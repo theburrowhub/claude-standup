@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+from claude_standup.llm import LLMBackend
 from claude_standup.models import Activity
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-MODEL = "claude-opus-4-6-20250414"
 
 REPORTER_SYSTEM_PROMPT = """\
 You are a concise standup-report generator.  You receive a list of classified \
@@ -33,44 +32,19 @@ Rules:
 # ---------------------------------------------------------------------------
 
 def generate_report(
-    client,
+    backend: LLMBackend,
     activities: list[Activity],
     lang: str = "es",
     output_format: str = "markdown",
 ) -> str:
-    """Generate a standup report from *activities* using the Anthropic API.
-
-    Parameters
-    ----------
-    client:
-        An ``anthropic.Anthropic`` (or compatible mock) instance.
-    activities:
-        Classified activities to include in the report.
-    lang:
-        Language code — ``"es"`` for Spanish, ``"en"`` for English.
-    output_format:
-        ``"markdown"`` or ``"slack"``.
-
-    Returns
-    -------
-    str
-        The formatted standup report text.
-    """
+    """Generate a standup report from *activities* using an LLM backend."""
     if not activities:
         if lang == "en":
             return "No activity found for the requested period."
         return "No se encontró actividad para el período solicitado."
 
     user_prompt = _build_report_prompt(activities, lang, output_format)
-
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=REPORTER_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    text = message.content[0].text
+    text = backend.query(REPORTER_SYSTEM_PROMPT, user_prompt, max_tokens=2048)
 
     if output_format == "slack":
         return format_as_slack(text)
@@ -82,14 +56,7 @@ def _build_report_prompt(
     lang: str,
     output_format: str,
 ) -> str:
-    """Build the user-message prompt sent to the model.
-
-    Each activity is rendered as::
-
-        - [YYYY-MM-DD] [CLASSIFICATION](org/repo) summary ~Xmin
-
-    The prompt also contains language and format instructions.
-    """
+    """Build the user-message prompt sent to the model."""
     lines: list[str] = []
 
     for act in activities:
@@ -108,11 +75,9 @@ def _build_report_prompt(
 
     activities_block = "\n".join(lines)
 
-    # Language instruction
     lang_name = "English" if lang == "en" else "Spanish"
     lang_instruction = f"Write the report in {lang_name}."
 
-    # Format instruction
     if output_format == "slack":
         fmt_instruction = (
             "Use Slack formatting: *bold* for headings, \u2022 (bullet) for list items. "

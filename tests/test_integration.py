@@ -27,22 +27,11 @@ from claude_standup.reporter import generate_report
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-def _make_classifier_response(activities_data: list[dict]) -> MagicMock:
-    """Return a mock Anthropic client whose messages.create returns *activities_data*."""
-    client = MagicMock()
-    response = MagicMock()
-    response.content = [MagicMock(type="text", text=json.dumps({"activities": activities_data}))]
-    client.messages.create.return_value = response
-    return client
-
-
-def _make_reporter_client(report_text: str) -> MagicMock:
-    """Return a mock Anthropic client whose messages.create returns *report_text*."""
-    client = MagicMock()
-    response = MagicMock()
-    response.content = [MagicMock(type="text", text=report_text)]
-    client.messages.create.return_value = response
-    return client
+def _make_mock_backend(response_text: str) -> MagicMock:
+    """Return a mock LLMBackend that returns *response_text*."""
+    backend = MagicMock()
+    backend.query.return_value = response_text
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +60,8 @@ class TestFullPipeline:
         entries = parse_jsonl_file(files[0].path, project_name)
         assert len(entries) > 0  # valid_session.jsonl has user + assistant entries
 
-        # 4. Classify with mocked client
-        classifier_client = _make_classifier_response([
+        # 4. Classify with mocked backend
+        classifier_backend = _make_mock_backend(json.dumps({"activities": [
             {
                 "classification": "FEATURE",
                 "summary": "Implemented login feature with OAuth2",
@@ -81,8 +70,8 @@ class TestFullPipeline:
                 "time_spent_minutes": 30,
                 "prompt_indices": [0, 1],
             }
-        ])
-        activities = classify_session(classifier_client, entries, git_org="acme", git_repo="my-app")
+        ]}))
+        activities = classify_session(classifier_backend, entries, git_org="acme", git_repo="my-app")
         assert len(activities) == 1
         assert activities[0].classification == "FEATURE"
 
@@ -106,8 +95,8 @@ class TestFullPipeline:
             "### Blockers\n"
             "- None identified"
         )
-        reporter_client = _make_reporter_client(report_text)
-        report = generate_report(reporter_client, results, lang="es", output_format="markdown")
+        reporter_backend = _make_mock_backend(report_text)
+        report = generate_report(reporter_backend, results, lang="es", output_format="markdown")
 
         assert "2026-04-21" in report
         assert "login" in report.lower()

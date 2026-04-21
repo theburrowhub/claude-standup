@@ -1,18 +1,15 @@
 """Classify Claude Code log entries into structured development activities.
 
-Uses the Anthropic API (Claude) to analyze user prompts from coding sessions
-and group them into meaningful activities with classifications, summaries,
-and metadata.
+Uses an LLM backend (Claude CLI or Anthropic SDK) to analyze user prompts
+from coding sessions and group them into meaningful activities.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
 
-import anthropic
-
+from claude_standup.llm import LLMBackend
 from claude_standup.models import Activity, LogEntry
 
 logger = logging.getLogger(__name__)
@@ -20,10 +17,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-MODEL = "claude-opus-4-6-20250414"
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 2.0
 
 CLASSIFICATION_SYSTEM_PROMPT = """\
 You are a developer-activity classifier. You will receive a numbered list of \
@@ -69,41 +62,27 @@ Return ONLY valid JSON with this exact structure (no markdown fences):
 # ---------------------------------------------------------------------------
 
 def classify_session(
-    client: anthropic.Anthropic,
+    backend: LLMBackend,
     entries: list[LogEntry],
     git_org: str | None = None,
     git_repo: str | None = None,
 ) -> list[Activity]:
-    """Classify a list of log entries into structured activities.
-
-    Parameters
-    ----------
-    client:
-        An initialised Anthropic API client.
-    entries:
-        Log entries to classify (only ``user_prompt`` entries are used).
-    git_org:
-        GitHub organisation name to attach to resulting activities.
-    git_repo:
-        GitHub repository name to attach to resulting activities.
-
-    Returns
-    -------
-    list[Activity]
-        Classified activities.  Returns ``[]`` when *entries* is empty or the
-        API call fails gracefully.
-    """
-    # Filter to user_prompt entries only
+    """Classify a list of log entries into structured activities."""
     user_entries = [e for e in entries if e.entry_type == "user_prompt"]
     if not user_entries:
         return []
 
     prompt = _build_classification_prompt(user_entries)
-    response_text = _call_api_with_retry(client, prompt)
-    if response_text is None:
+
+    try:
+        response_text = backend.query(CLASSIFICATION_SYSTEM_PROMPT, prompt)
+    except Exception:
+        logger.warning("Classification API call failed.", exc_info=True)
         return []
 
-    # Derive project and day from the first entry
+    if not response_text:
+        return []
+
     project = user_entries[0].project
     return _parse_classification_response(
         response_text, user_entries, project, git_org, git_repo
@@ -115,66 +94,11 @@ def classify_session(
 # ---------------------------------------------------------------------------
 
 def _build_classification_prompt(entries: list[LogEntry]) -> str:
-    """Format log entries into a numbered prompt list for the classifier.
-
-    Each line is formatted as:
-        [index] (timestamp) content
-    """
+    """Format log entries into a numbered prompt list for the classifier."""
     lines: list[str] = []
     for idx, entry in enumerate(entries):
         lines.append(f"[{idx}] ({entry.timestamp}) {entry.content}")
     return "\n".join(lines)
-
-
-def _call_api_with_retry(client: anthropic.Anthropic, prompt: str) -> str | None:
-    """Call the Anthropic API with exponential-backoff retry on rate limits.
-
-    Parameters
-    ----------
-    client:
-        An initialised Anthropic API client.
-    prompt:
-        The user-facing prompt to send.
-
-    Returns
-    -------
-    str | None
-        The text content of the response, or ``None`` if all retries are
-        exhausted.
-
-    Raises
-    ------
-    anthropic.APIError
-        Re-raised immediately for non-rate-limit API errors.
-    """
-    for attempt in range(MAX_RETRIES):
-        try:
-            message = client.messages.create(
-                model=MODEL,
-                max_tokens=4096,
-                system=CLASSIFICATION_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            # Extract text from the first text block
-            for block in message.content:
-                if block.type == "text":
-                    return block.text
-            return None  # pragma: no cover
-        except anthropic.RateLimitError:
-            if attempt == MAX_RETRIES - 1:
-                logger.warning(
-                    "Rate-limited after %d retries; giving up.", MAX_RETRIES
-                )
-                return None
-            delay = RETRY_BASE_DELAY * (2 ** attempt)
-            logger.info(
-                "Rate-limited (attempt %d/%d). Retrying in %.1fs…",
-                attempt + 1,
-                MAX_RETRIES,
-                delay,
-            )
-            time.sleep(delay)
-    return None  # pragma: no cover — unreachable
 
 
 def _parse_classification_response(
@@ -184,12 +108,17 @@ def _parse_classification_response(
     git_org: str | None,
     git_repo: str | None,
 ) -> list[Activity]:
-    """Parse the JSON response from the classifier into Activity objects.
+    """Parse the JSON response from the classifier into Activity objects."""
+    # Strip markdown fences if present
+    text = response_text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Remove first and last lines (```json and ```)
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines)
 
-    Handles malformed JSON and missing keys gracefully by returning ``[]``.
-    """
     try:
-        data = json.loads(response_text)
+        data = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         logger.warning("Malformed JSON in classification response.")
         return []
@@ -198,12 +127,10 @@ def _parse_classification_response(
         logger.warning("Missing 'activities' key in classification response.")
         return []
 
-    # Derive the day from the first entry's timestamp (YYYY-MM-DD)
     day = entries[0].timestamp[:10] if entries else ""
 
     activities: list[Activity] = []
     for item in data["activities"]:
-        # Gather raw prompts from indices
         indices = item.get("prompt_indices", [])
         raw_prompts = [
             entries[i].content

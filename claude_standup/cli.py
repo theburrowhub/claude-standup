@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-import anthropic
-
 from claude_standup.cache import CacheDB
 from claude_standup.classifier import classify_session
+from claude_standup.llm import get_llm_backend
 from claude_standup.models import GitInfo, LogEntry
 from claude_standup.parser import (
     derive_project_name,
@@ -163,7 +161,7 @@ def resolve_date_range(
 # ---------------------------------------------------------------------------
 
 def _run_report_pipeline(
-    client,
+    backend,
     db: CacheDB,
     logs_base: str,
     args: argparse.Namespace,
@@ -240,7 +238,7 @@ def _run_report_pipeline(
             )
 
             activities = classify_session(
-                client, session_entries, git_org=git_info.org, git_repo=git_info.repo,
+                backend, session_entries, git_org=git_info.org, git_repo=git_info.repo,
             )
             if activities:
                 db.store_activities(activities)
@@ -256,7 +254,7 @@ def _run_report_pipeline(
         print(f"Activities found: {len(activities)}", file=sys.stderr)
 
     # 6. Generate report
-    report = generate_report(client, activities, lang=args.lang, output_format=args.format)
+    report = generate_report(backend, activities, lang=args.lang, output_format=args.format)
     return report
 
 
@@ -266,8 +264,9 @@ def _run_report_pipeline(
 
 def _looks_like_subagent_dir(name: str) -> bool:
     """Return True if *name* looks like a Claude subagent UUID directory."""
-    # Subagent dirs are typically UUID-v4 style: 8-4-4-4-12 hex chars
     return bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", name))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -308,13 +307,12 @@ def main(
         print(f"Logged: [{args.type}] {args.message}", file=sys.stderr)
         return
 
-    # -- Report commands: require API key ---
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("Error: ANTHROPIC_API_KEY environment variable is required.", file=sys.stderr)
+    # -- Report commands: require LLM backend ---
+    try:
+        backend = get_llm_backend()
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    client = anthropic.Anthropic(api_key=api_key)
 
     if effective_db_path != ":memory:":
         Path(effective_db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -322,7 +320,7 @@ def main(
     db = CacheDB(effective_db_path)
 
     try:
-        report = _run_report_pipeline(client, db, effective_logs_base, args)
+        report = _run_report_pipeline(backend, db, effective_logs_base, args)
         print(report)
 
         if args.output:

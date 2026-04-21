@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -158,13 +157,13 @@ class TestResolveDateRange:
 class TestMain:
     """Integration-level tests for the main() entry point."""
 
-    def test_missing_api_key(self, tmp_path, capsys):
-        with patch.dict("os.environ", {}, clear=True):
+    def test_no_backend_available(self, tmp_path, capsys):
+        with patch("claude_standup.cli.get_llm_backend", side_effect=RuntimeError("No LLM backend available.")):
             with pytest.raises(SystemExit) as exc_info:
                 main(["today"], logs_base=str(tmp_path), db_path=":memory:")
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
-        assert "ANTHROPIC_API_KEY" in captured.err
+        assert "No LLM backend" in captured.err
 
     def test_log_command_stores_entry(self, tmp_path):
         db_path = str(tmp_path / "test.db")
@@ -182,32 +181,30 @@ class TestMain:
 
     def test_report_output_to_file(self, tmp_path, capsys):
         output_file = str(tmp_path / "report.md")
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake-key"}):
-            with patch("claude_standup.cli.anthropic") as mock_anthropic:
-                with patch("claude_standup.cli._run_report_pipeline", return_value="## Report"):
-                    main(
-                        ["today", "--output", output_file],
-                        logs_base=str(tmp_path),
-                        db_path=":memory:",
-                    )
+        mock_backend = MagicMock()
+        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
+            with patch("claude_standup.cli._run_report_pipeline", return_value="## Report"):
+                main(
+                    ["today", "--output", output_file],
+                    logs_base=str(tmp_path),
+                    db_path=":memory:",
+                )
 
-        # Report should be written to the file
         with open(output_file) as f:
             assert f.read() == "## Report"
 
-        # Report should also be printed to stdout
         captured = capsys.readouterr()
         assert "## Report" in captured.out
 
     def test_verbose_output(self, tmp_path, capsys):
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "fake-key"}):
-            with patch("claude_standup.cli.anthropic") as mock_anthropic:
-                with patch("claude_standup.cli._run_report_pipeline", return_value="## Report"):
-                    main(
-                        ["today", "--verbose"],
-                        logs_base=str(tmp_path),
-                        db_path=":memory:",
-                    )
+        mock_backend = MagicMock()
+        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
+            with patch("claude_standup.cli._run_report_pipeline", return_value="## Report"):
+                main(
+                    ["today", "--verbose"],
+                    logs_base=str(tmp_path),
+                    db_path=":memory:",
+                )
 
         captured = capsys.readouterr()
         assert "## Report" in captured.out

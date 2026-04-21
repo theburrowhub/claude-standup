@@ -42,13 +42,11 @@ SAMPLE_SLACK_REPORT = (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_mock_client(report_text: str) -> MagicMock:
-    """Create a mock Anthropic client that returns *report_text*."""
-    client = MagicMock()
-    message = MagicMock()
-    message.content = [MagicMock(type="text", text=report_text)]
-    client.messages.create.return_value = message
-    return client
+def _make_mock_backend(report_text: str) -> MagicMock:
+    """Create a mock LLMBackend that returns *report_text*."""
+    backend = MagicMock()
+    backend.query.return_value = report_text
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -61,70 +59,59 @@ class TestGenerateReport:
     def test_generates_markdown(self, sample_activities):
         from claude_standup.reporter import generate_report
 
-        client = _make_mock_client(SAMPLE_MARKDOWN_REPORT)
-        result = generate_report(client, sample_activities, lang="es", output_format="markdown")
+        backend = _make_mock_backend(SAMPLE_MARKDOWN_REPORT)
+        result = generate_report(backend, sample_activities, lang="es", output_format="markdown")
 
         assert "## 2026-04-20" in result
         assert "Yesterday" in result
-        client.messages.create.assert_called_once()
+        backend.query.assert_called_once()
 
     def test_generates_slack(self, sample_activities):
         from claude_standup.reporter import generate_report
 
-        client = _make_mock_client(SAMPLE_SLACK_REPORT)
-        result = generate_report(client, sample_activities, lang="es", output_format="slack")
+        backend = _make_mock_backend(SAMPLE_SLACK_REPORT)
+        result = generate_report(backend, sample_activities, lang="es", output_format="slack")
 
         assert "*2026-04-20*" in result
-        client.messages.create.assert_called_once()
+        backend.query.assert_called_once()
 
     def test_empty_activities_es(self):
         from claude_standup.reporter import generate_report
 
-        client = MagicMock()
-        result = generate_report(client, [], lang="es", output_format="markdown")
+        backend = MagicMock()
+        result = generate_report(backend, [], lang="es", output_format="markdown")
 
         assert "No se encontró actividad" in result
-        client.messages.create.assert_not_called()
+        backend.query.assert_not_called()
 
     def test_empty_activities_en(self):
         from claude_standup.reporter import generate_report
 
-        client = MagicMock()
-        result = generate_report(client, [], lang="en", output_format="markdown")
+        backend = MagicMock()
+        result = generate_report(backend, [], lang="en", output_format="markdown")
 
         assert "No activity found" in result
-        client.messages.create.assert_not_called()
+        backend.query.assert_not_called()
 
     def test_lang_passed_to_prompt(self, sample_activities):
         from claude_standup.reporter import generate_report
 
-        client = _make_mock_client(SAMPLE_MARKDOWN_REPORT)
-        generate_report(client, sample_activities, lang="en", output_format="markdown")
+        backend = _make_mock_backend(SAMPLE_MARKDOWN_REPORT)
+        generate_report(backend, sample_activities, lang="en", output_format="markdown")
 
-        call_kwargs = client.messages.create.call_args
-        # The user message should mention English / en
-        user_messages = [
-            m for m in call_kwargs.kwargs.get("messages", call_kwargs[1].get("messages", []))
-            if m["role"] == "user"
-        ]
-        assert len(user_messages) == 1
-        user_content = user_messages[0]["content"]
-        assert "english" in user_content.lower() or "en" in user_content.lower()
+        call_args = backend.query.call_args[0]
+        user_prompt = call_args[1]  # second positional arg
+        assert "english" in user_prompt.lower() or "en" in user_prompt.lower()
 
     def test_format_passed_to_prompt(self, sample_activities):
         from claude_standup.reporter import generate_report
 
-        client = _make_mock_client(SAMPLE_SLACK_REPORT)
-        generate_report(client, sample_activities, lang="es", output_format="slack")
+        backend = _make_mock_backend(SAMPLE_SLACK_REPORT)
+        generate_report(backend, sample_activities, lang="es", output_format="slack")
 
-        call_kwargs = client.messages.create.call_args
-        user_messages = [
-            m for m in call_kwargs.kwargs.get("messages", call_kwargs[1].get("messages", []))
-            if m["role"] == "user"
-        ]
-        assert len(user_messages) == 1
-        user_content = user_messages[0]["content"]
-        assert "slack" in user_content.lower() or "Slack" in user_content
+        call_args = backend.query.call_args[0]
+        user_prompt = call_args[1]
+        assert "slack" in user_prompt.lower() or "Slack" in user_prompt
 
 
 # ---------------------------------------------------------------------------
