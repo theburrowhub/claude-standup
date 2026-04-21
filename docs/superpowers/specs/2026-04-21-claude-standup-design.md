@@ -101,7 +101,7 @@ CREATE TABLE activities (
     session_id TEXT,
     day TEXT,              -- YYYY-MM-DD
     project TEXT,
-    classification TEXT,   -- FEATURE, BUGFIX, REFACTOR, DEBUGGING, EXPLORATION, REVIEW, OTHER
+    classification TEXT,   -- FEATURE, BUGFIX, REFACTOR, DEBUGGING, EXPLORATION, REVIEW, SUPPORT, MEETING, OTHER
     summary TEXT,          -- one-line description of the activity
     files_mentioned TEXT,  -- JSON array of file paths
     technologies TEXT,     -- JSON array of tech names
@@ -130,6 +130,8 @@ Classification categories:
 - `DEBUGGING` — investigating issues, reading logs, tracing errors
 - `EXPLORATION` — reading code, understanding codebase, research
 - `REVIEW` — code review, PR review
+- `SUPPORT` — helping teammates, answering questions, pair programming
+- `MEETING` — meetings, syncs, planning sessions
 - `OTHER` — anything that doesn't fit above
 
 The classifier sends a single API call per session with all prompts, asking Claude to:
@@ -213,9 +215,10 @@ Commands (positional argument):
 - `today` — report for today
 - `yesterday` — report for yesterday
 - `last-7-days` — report for the last 7 days
+- `log "<description>"` — register a manual activity (non-Claude work)
 - (default if no command) — `today`
 
-Flags:
+Flags (report commands):
 - `--from YYYY-MM-DD` — start date (overrides command)
 - `--to YYYY-MM-DD` — end date (overrides command)
 - `--project <name>` — filter by project (substring match against project directory name)
@@ -224,6 +227,10 @@ Flags:
 - `--output <file>` — write report to file (in addition to stdout)
 - `--reprocess` — ignore cache and reprocess all logs
 - `--verbose` — show processing progress
+
+Flags (log command):
+- `--type FEATURE|BUGFIX|REFACTOR|DEBUGGING|EXPLORATION|REVIEW|SUPPORT|MEETING|OTHER` — activity type (default: `OTHER`)
+- `--project <name>` — associate with a project
 
 Entry point: `claude-standup` (via pyproject.toml console_scripts).
 
@@ -268,6 +275,23 @@ claude-standup/
 cd claude-standup
 pip install -e .
 ```
+
+## Manual Activity Logging
+
+The `log` command allows registering activities that happen outside of Claude Code sessions.
+
+```bash
+# Log a support activity
+claude-standup log "Helped mobile team debug their deploy pipeline" --type SUPPORT --project overmind
+
+# Log a meeting
+claude-standup log "Sprint planning with backend team" --type MEETING
+
+# Log without type (defaults to OTHER)
+claude-standup log "Reviewed architecture docs for new auth system"
+```
+
+Manual entries are stored in the `activities` table with `session_id = "manual"` and timestamped at the moment of insertion. They are mixed chronologically with Claude-derived activities in reports — no special treatment.
 
 ## Usage Examples
 
