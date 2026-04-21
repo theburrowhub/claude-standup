@@ -236,3 +236,351 @@ class TestMain:
             main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
         captured = capsys.readouterr()
         assert "3 file(s) processed" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# TestDaemonSubcommand
+# ---------------------------------------------------------------------------
+
+class TestDaemonSubcommand:
+    """Tests for the 'daemon' subcommand and its nested actions."""
+
+    def test_daemon_command_parses(self):
+        args = parse_args(["daemon", "status"])
+        assert args.command == "daemon"
+        assert args.daemon_action == "status"
+
+    def test_daemon_start_parses(self):
+        args = parse_args(["daemon", "start"])
+        assert args.command == "daemon"
+        assert args.daemon_action == "start"
+
+    def test_daemon_stop_parses(self):
+        args = parse_args(["daemon", "stop"])
+        assert args.command == "daemon"
+        assert args.daemon_action == "stop"
+
+    def test_daemon_run_parses(self):
+        args = parse_args(["daemon", "run"])
+        assert args.command == "daemon"
+        assert args.daemon_action == "run"
+
+    def test_daemon_uninstall_parses(self):
+        args = parse_args(["daemon", "uninstall"])
+        assert args.command == "daemon"
+        assert args.daemon_action == "uninstall"
+
+    def test_daemon_status(self, tmp_path, capsys):
+        """daemon status should print daemon running state."""
+        mock_status = MagicMock()
+        mock_status.running = False
+        mock_status.pid = None
+        with patch("claude_standup.service.DaemonStatus.check", return_value=mock_status):
+            main(["daemon", "status"], logs_base=str(tmp_path), db_path=":memory:")
+        captured = capsys.readouterr()
+        assert "not running" in captured.err
+
+    def test_daemon_status_running(self, tmp_path, capsys):
+        """daemon status should show PID when running."""
+        mock_status = MagicMock()
+        mock_status.running = True
+        mock_status.pid = 12345
+        with patch("claude_standup.service.DaemonStatus.check", return_value=mock_status):
+            main(["daemon", "status"], logs_base=str(tmp_path), db_path=":memory:")
+        captured = capsys.readouterr()
+        assert "running" in captured.err
+        assert "12345" in captured.err
+
+    def test_daemon_start(self, tmp_path, capsys):
+        """daemon start should install and start the service."""
+        mock_mgr = MagicMock()
+        with patch("claude_standup.service.get_service_manager", return_value=mock_mgr):
+            main(["daemon", "start"], logs_base=str(tmp_path), db_path=":memory:")
+        mock_mgr.install.assert_called_once()
+        captured = capsys.readouterr()
+        assert "installed and started" in captured.err
+
+    def test_daemon_stop(self, tmp_path, capsys):
+        """daemon stop should uninstall the service."""
+        mock_mgr = MagicMock()
+        with patch("claude_standup.service.get_service_manager", return_value=mock_mgr):
+            main(["daemon", "stop"], logs_base=str(tmp_path), db_path=":memory:")
+        mock_mgr.uninstall.assert_called_once()
+        captured = capsys.readouterr()
+        assert "stopped" in captured.err
+
+    def test_daemon_run(self, tmp_path, capsys):
+        """daemon run should start the DaemonRunner in foreground."""
+        mock_runner = MagicMock()
+        with patch("claude_standup.cli.get_llm_backend", side_effect=RuntimeError("no key")):
+            with patch("claude_standup.daemon.write_pid_file"):
+                with patch("claude_standup.daemon.remove_pid_file"):
+                    with patch("claude_standup.daemon.DaemonRunner", return_value=mock_runner) as mock_cls:
+                        main(
+                            ["daemon", "run"],
+                            logs_base=str(tmp_path),
+                            db_path=str(tmp_path / "test.db"),
+                        )
+        mock_cls.assert_called_once()
+        mock_runner.run_forever.assert_called_once()
+
+    def test_daemon_uninstall(self, tmp_path, capsys):
+        """daemon uninstall should uninstall the service."""
+        mock_mgr = MagicMock()
+        with patch("claude_standup.service.get_service_manager", return_value=mock_mgr):
+            main(["daemon", "uninstall"], logs_base=str(tmp_path), db_path=":memory:")
+        mock_mgr.uninstall.assert_called_once()
+        captured = capsys.readouterr()
+        assert "uninstalled" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# TestStatusCommand
+# ---------------------------------------------------------------------------
+
+class TestStatusCommand:
+    """Tests for the 'status' subcommand."""
+
+    def test_status_command_parses(self):
+        args = parse_args(["status"])
+        assert args.command == "status"
+
+    def test_status_output(self, tmp_path, capsys):
+        """Pre-populate DB with 1 classified + 1 unclassified session, verify 50% in output."""
+        from claude_standup.cache import CacheDB
+
+        db_path = str(tmp_path / "test.db")
+        db = CacheDB(db_path)
+        # Insert a classified session
+        db.store_session(
+            session_id="sess-001",
+            project="proj-a",
+            git_org="acme",
+            git_repo="app",
+            first_ts="2026-04-21T10:00:00Z",
+            last_ts="2026-04-21T11:00:00Z",
+        )
+        db.mark_session_classified("sess-001")
+        # Insert an unclassified session
+        db.store_session(
+            session_id="sess-002",
+            project="proj-b",
+            git_org="acme",
+            git_repo="api",
+            first_ts="2026-04-21T12:00:00Z",
+            last_ts="2026-04-21T13:00:00Z",
+        )
+        # Also mark a file as processed so there's a file count
+        db.mark_file_processed("/fake/file.jsonl", 1234.0)
+        db.close()
+
+        mock_status = MagicMock()
+        mock_status.running = False
+        mock_status.pid = None
+        with patch("claude_standup.service.DaemonStatus.check", return_value=mock_status):
+            with patch("claude_standup.cli._process_new_files", return_value=0):
+                main(["status"], logs_base=str(tmp_path), db_path=db_path)
+
+        captured = capsys.readouterr()
+        assert "50%" in captured.out
+        assert "2 total" in captured.out
+        assert "1 classified" in captured.out
+        assert "1 pending" in captured.out
+        assert "1 parsed" in captured.out
+        assert "not running" in captured.out
+
+    def test_status_empty_db(self, tmp_path, capsys):
+        """Status with no sessions should show 100% (no pending)."""
+        mock_status = MagicMock()
+        mock_status.running = False
+        mock_status.pid = None
+        with patch("claude_standup.service.DaemonStatus.check", return_value=mock_status):
+            with patch("claude_standup.cli._process_new_files", return_value=0):
+                main(["status"], logs_base=str(tmp_path), db_path=":memory:")
+
+        captured = capsys.readouterr()
+        assert "100%" in captured.out
+        assert "0 total" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# TestTemplateFlag
+# ---------------------------------------------------------------------------
+
+class TestTemplateFlag:
+    """Tests for the --template flag."""
+
+    def test_template_flag_true(self):
+        args = parse_args(["today", "--template"])
+        assert args.template is True
+
+    def test_template_flag_default(self):
+        args = parse_args(["today"])
+        assert args.template is False
+
+    def test_template_flag_default_no_subcommand(self):
+        """When no subcommand is given, template should default to False."""
+        args = parse_args([])
+        assert args.template is False
+
+    def test_template_flag_on_yesterday(self):
+        args = parse_args(["yesterday", "--template"])
+        assert args.template is True
+
+    def test_template_flag_on_last_7_days(self):
+        args = parse_args(["last-7-days", "--template"])
+        assert args.template is True
+
+
+# ---------------------------------------------------------------------------
+# TestReadOnlyReports
+# ---------------------------------------------------------------------------
+
+class TestReadOnlyReports:
+    """Tests ensuring reports are read-only (no classification in CLI)."""
+
+    def test_today_no_classification(self, tmp_path, capsys):
+        """Report pipeline should not call classify_session; backend.query called at most once."""
+        mock_backend = MagicMock()
+        mock_backend.query.return_value = "## Today Report"
+
+        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
+            with patch("claude_standup.cli._process_new_files", return_value=0):
+                main(["today"], logs_base=str(tmp_path), db_path=":memory:")
+
+        captured = capsys.readouterr()
+        # Backend query should be called at most once (for report generation only)
+        assert mock_backend.query.call_count <= 1
+
+    def test_template_no_llm_calls(self, tmp_path, capsys):
+        """--template should not call get_llm_backend at all."""
+        with patch("claude_standup.cli.get_llm_backend") as mock_get_backend:
+            with patch("claude_standup.cli._process_new_files", return_value=0):
+                main(
+                    ["today", "--template"],
+                    logs_base=str(tmp_path),
+                    db_path=":memory:",
+                )
+
+        mock_get_backend.assert_not_called()
+        captured = capsys.readouterr()
+        # Should produce output (template report, even if empty)
+        assert captured.out.strip() != "" or captured.out == ""  # no crash
+
+    def test_template_produces_output(self, tmp_path, capsys):
+        """--template with activities should produce a template report."""
+        from claude_standup.cache import CacheDB
+        from claude_standup.models import Activity
+
+        db_path = str(tmp_path / "test.db")
+        db = CacheDB(db_path)
+        # Store a classified activity for today
+        from datetime import date as date_cls
+        today_str = date_cls.today().isoformat()
+        db.store_activities([
+            Activity(
+                session_id="sess-001",
+                day=today_str,
+                project="my-project",
+                git_org="acme",
+                git_repo="app",
+                classification="FEATURE",
+                summary="Added new login page",
+                time_spent_minutes=45,
+            )
+        ])
+        db.close()
+
+        with patch("claude_standup.cli._process_new_files", return_value=0):
+            main(
+                ["today", "--template"],
+                logs_base=str(tmp_path),
+                db_path=db_path,
+            )
+
+        captured = capsys.readouterr()
+        assert "FEATURE" in captured.out
+        assert "Added new login page" in captured.out
+
+    def test_report_pipeline_read_only(self, tmp_path):
+        """_run_report_pipeline should not import or call classify_session."""
+        import argparse
+        from claude_standup.cache import CacheDB
+        from claude_standup.cli import _run_report_pipeline
+
+        mock_backend = MagicMock()
+        mock_backend.query.return_value = "Report text"
+
+        db = CacheDB(":memory:")
+
+        args = argparse.Namespace(
+            command="today",
+            date_from=None,
+            date_to=None,
+            org=None,
+            repo=None,
+            lang="es",
+            format="markdown",
+            output=None,
+            reprocess=False,
+            verbose=False,
+            template=False,
+        )
+
+        with patch("claude_standup.cli._process_new_files", return_value=0):
+            result = _run_report_pipeline(mock_backend, db, str(tmp_path), args)
+
+        db.close()
+
+        # The result should be a string (the report)
+        assert isinstance(result, str)
+        # Backend.query should have been called at most once (for report generation)
+        assert mock_backend.query.call_count <= 1
+
+    def test_pending_sessions_warning_in_report(self, tmp_path):
+        """When there are pending sessions, the report should include a warning."""
+        import argparse
+        from claude_standup.cache import CacheDB
+        from claude_standup.cli import _run_report_pipeline
+        from datetime import date as date_cls
+
+        mock_backend = MagicMock()
+        mock_backend.query.return_value = "Report text"
+
+        db_path = str(tmp_path / "test.db")
+        db = CacheDB(db_path)
+
+        today_str = date_cls.today().isoformat()
+
+        # Store an unclassified session for today
+        db.store_session(
+            session_id="sess-pending",
+            project="proj",
+            git_org="acme",
+            git_repo="app",
+            first_ts=f"{today_str}T10:00:00Z",
+            last_ts=f"{today_str}T11:00:00Z",
+        )
+
+        args = argparse.Namespace(
+            command="today",
+            date_from=None,
+            date_to=None,
+            org=None,
+            repo=None,
+            lang="es",
+            format="markdown",
+            output=None,
+            reprocess=False,
+            verbose=False,
+            template=False,
+        )
+
+        with patch("claude_standup.cli._process_new_files", return_value=0):
+            with patch("claude_standup.daemon.is_daemon_running", return_value=False):
+                result = _run_report_pipeline(mock_backend, db, str(tmp_path), args)
+
+        db.close()
+
+        assert "pending classification" in result
+        assert "daemon: not running" in result

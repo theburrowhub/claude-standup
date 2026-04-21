@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 
 from claude_standup.cache import CacheDB
-from claude_standup.classifier import classify_session
 from claude_standup.llm import get_llm_backend
 from claude_standup.models import GitInfo, LogEntry
 from claude_standup.parser import (
@@ -19,7 +19,7 @@ from claude_standup.parser import (
     parse_jsonl_file,
     resolve_git_remote,
 )
-from claude_standup.reporter import generate_report
+from claude_standup.reporter import generate_report, generate_template_report
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,7 +47,8 @@ VALID_TYPES = [
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments and return a ``Namespace``.
 
-    Subcommands: ``today``, ``yesterday``, ``last-7-days``, ``log``.
+    Subcommands: ``today``, ``yesterday``, ``last-7-days``, ``log``,
+    ``daemon``, ``status``.
     When no subcommand is given the default is ``today``.
     """
     # Shared flags added to every subparser via parent inheritance
@@ -73,6 +74,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     common.add_argument("--output", default=None, help="Write report to this file path.")
     common.add_argument("--reprocess", action="store_true", help="Re-process all log files.")
     common.add_argument("--verbose", action="store_true", help="Print progress to stderr.")
+    common.add_argument(
+        "--template", action="store_true", default=False,
+        help="Use local template (no LLM call).",
+    )
 
     parser = argparse.ArgumentParser(
         prog="claude-standup",
@@ -92,6 +97,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Activity type (default: OTHER).",
     )
 
+    # daemon subcommand with nested action
+    daemon_parser = subparsers.add_parser("daemon", help="Manage background daemon.")
+    daemon_parser.add_argument(
+        "daemon_action",
+        choices=["start", "stop", "status", "run", "uninstall"],
+        help="Daemon action.",
+    )
+
+    # status subcommand
+    subparsers.add_parser("status", parents=[common], help="Show processing status.")
+
     args = parser.parse_args(argv)
 
     # Default command when none is provided
@@ -109,6 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "output": None,
             "reprocess": False,
             "verbose": False,
+            "template": False,
         }
         for key, value in defaults.items():
             if not hasattr(args, key):
@@ -159,7 +176,7 @@ def resolve_date_range(
 
 
 # ---------------------------------------------------------------------------
-# Report pipeline
+# Report pipeline (read-only — no classification)
 # ---------------------------------------------------------------------------
 
 def _process_new_files(
@@ -170,8 +187,8 @@ def _process_new_files(
 ) -> int:
     """Parse unprocessed JSONL files and store sessions + raw prompts in cache.
 
-    This is a local-only operation — no LLM calls. Classification happens
-    lazily when a report is requested for a specific date range.
+    This is a local-only operation — no LLM calls. Classification is done
+    by the background daemon.
 
     Returns the number of files processed.
     """
@@ -239,84 +256,19 @@ def _process_new_files(
     return total
 
 
-def _classify_pending_sessions(
-    backend,
-    db: CacheDB,
-    date_from: str,
-    date_to: str,
-    orgs: list[str] | None = None,
-    repos: list[str] | None = None,
-    verbose: bool = False,
-) -> None:
-    """Classify unclassified sessions in the date range using parallel threads."""
-    unclassified = db.get_unclassified_sessions(date_from, date_to, orgs=orgs, repos=repos)
-    if not unclassified:
-        return
-
-    # Build per-session entry lists, filtering prompts to the date range
-    session_jobs: list[tuple[dict, list[LogEntry]]] = []
-    for sess in unclassified:
-        raw = db.get_raw_prompts(sess["session_id"], date_from=date_from, date_to=date_to)
-        if not raw:
-            db.mark_session_classified(sess["session_id"])
-            continue
-        entries = [
-            LogEntry(timestamp=ts, session_id=sess["session_id"],
-                     project=sess["project"], entry_type="user_prompt",
-                     content=content, cwd="")
-            for ts, content in raw
-        ]
-        session_jobs.append((sess, entries))
-
-    if not session_jobs:
-        return
-
-    total_prompts = sum(len(e) for _, e in session_jobs)
-    if verbose:
-        print(f"Classifying {total_prompts} prompts from {len(session_jobs)} session(s)...", file=sys.stderr)
-
-    def _classify_one(sess_entries: tuple[dict, list[LogEntry]]) -> tuple[str, list[Activity]]:
-        sess, entries = sess_entries
-        activities = classify_session(
-            backend, entries,
-            git_org=sess["git_org"], git_repo=sess["git_repo"],
-        )
-        for act in activities:
-            act.project = sess["project"]
-        return sess["session_id"], activities
-
-    all_activities: list[Activity] = []
-    classified_ids: list[str] = []
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(_classify_one, job): job[0]["session_id"] for job in session_jobs}
-        done = 0
-        for future in as_completed(futures):
-            done += 1
-            sid = futures[future]
-            try:
-                session_id, activities = future.result()
-                all_activities.extend(activities)
-                classified_ids.append(session_id)
-                if verbose:
-                    print(f"  [{done}/{len(session_jobs)}] {session_id[:8]}...", file=sys.stderr)
-            except Exception:
-                classified_ids.append(sid)
-
-    if all_activities:
-        db.store_activities(all_activities)
-    for sid in classified_ids:
-        db.mark_session_classified(sid)
-
-
 def _run_report_pipeline(
     backend,
     db: CacheDB,
     logs_base: str,
     args: argparse.Namespace,
 ) -> str:
-    """Execute the full report pipeline and return the formatted report text."""
+    """Execute the read-only report pipeline and return the formatted report text.
+
+    Classification is handled by the background daemon.  This function only
+    reads pre-classified activities and counts pending sessions for a warning.
+    """
     verbose = getattr(args, "verbose", False)
+    use_template = getattr(args, "template", False)
 
     date_from, date_to = resolve_date_range(args.command, args.date_from, args.date_to)
     if verbose:
@@ -328,17 +280,40 @@ def _run_report_pipeline(
     orgs = [o.strip() for o in args.org.split(",")] if args.org else None
     repos = [r.strip() for r in args.repo.split(",")] if args.repo else None
 
-    # Step 2: Classify sessions for this date range (lazy, batched LLM calls)
-    _classify_pending_sessions(backend, db, date_from, date_to, orgs=orgs, repos=repos, verbose=verbose)
-
-    # Step 3: Query and generate report
+    # Step 2: Query classified activities
     activities = db.query_activities(date_from, date_to, orgs=orgs, repos=repos)
 
-    if verbose:
-        print(f"Activities found: {len(activities)}", file=sys.stderr)
+    # Step 3: Count pending sessions for warning
+    unclassified = db.get_unclassified_sessions(date_from, date_to, orgs=orgs, repos=repos)
+    pending_count = len(unclassified)
 
-    report = generate_report(backend, activities, lang=args.lang, output_format=args.format)
-    return report
+    if verbose:
+        print(f"Activities: {len(activities)}, Pending sessions: {pending_count}", file=sys.stderr)
+
+    # Template mode: no LLM call
+    if use_template:
+        return generate_template_report(
+            activities,
+            output_format=args.format,
+            pending_count=pending_count,
+            lang=args.lang,
+        )
+
+    # LLM report
+    if pending_count > 0:
+        from claude_standup.daemon import is_daemon_running
+        from claude_standup.service import DEFAULT_PID_PATH
+
+        warning = f"Warning: {pending_count} session(s) pending classification"
+        if is_daemon_running(DEFAULT_PID_PATH):
+            warning += " (daemon: running)"
+        else:
+            warning += " (daemon: not running -- run 'claude-standup daemon start')"
+
+        report = generate_report(backend, activities, lang=args.lang, output_format=args.format)
+        return f"{warning}\n\n{report}"
+
+    return generate_report(backend, activities, lang=args.lang, output_format=args.format)
 
 
 # ---------------------------------------------------------------------------
@@ -365,13 +340,20 @@ def main(
 
     - ``log`` command: stores a manual entry and prints confirmation to stderr.
       Does NOT require an API key.
+    - ``daemon`` command: manage the background classification daemon.
+    - ``status`` command: show processing statistics.
     - Report commands (``today``, ``yesterday``, ``last-7-days``): require
-      ``ANTHROPIC_API_KEY`` env var.  Runs the full pipeline, prints the report
-      to stdout, and optionally writes to a file.
+      ``ANTHROPIC_API_KEY`` env var unless ``--template`` is used.
+      Runs the pipeline, prints the report to stdout, and optionally writes to a file.
     """
     args = parse_args(argv)
     effective_db_path = db_path or DEFAULT_DB_PATH
     effective_logs_base = logs_base or DEFAULT_LOGS_BASE
+
+    # -- daemon command: manage background daemon ---
+    if args.command == "daemon":
+        _handle_daemon(args, effective_db_path, effective_logs_base)
+        return
 
     # -- log command: no API key needed ---
     if args.command == "log":
@@ -410,12 +392,23 @@ def main(
                 print(f"Warmup complete: {processed} file(s) processed.", file=sys.stderr)
             return
 
-        # -- Report commands: require LLM backend ---
-        try:
-            backend = get_llm_backend()
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+        # -- status command ---
+        if args.command == "status":
+            _handle_status(db, effective_logs_base)
+            return
+
+        # -- Report commands ---
+        use_template = getattr(args, "template", False)
+
+        if use_template:
+            # Template mode: no LLM backend needed
+            backend = None
+        else:
+            try:
+                backend = get_llm_backend()
+            except RuntimeError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
 
         report = _run_report_pipeline(backend, db, effective_logs_base, args)
         print(report)
@@ -426,3 +419,93 @@ def main(
                 f.write(report)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Daemon command handler
+# ---------------------------------------------------------------------------
+
+def _handle_daemon(
+    args: argparse.Namespace,
+    effective_db_path: str,
+    effective_logs_base: str,
+) -> None:
+    """Handle the ``daemon`` subcommand with its nested actions."""
+    action = args.daemon_action
+
+    if action == "run":
+        from claude_standup.daemon import DaemonRunner, remove_pid_file, write_pid_file
+        from claude_standup.service import DEFAULT_PID_PATH
+
+        try:
+            backend = get_llm_backend()
+        except RuntimeError:
+            backend = None  # daemon will skip classification
+
+        if effective_db_path != ":memory:":
+            Path(effective_db_path).parent.mkdir(parents=True, exist_ok=True)
+
+        write_pid_file(DEFAULT_PID_PATH, os.getpid())
+        try:
+            runner = DaemonRunner(effective_db_path, effective_logs_base, backend)
+            runner.run_forever()
+        finally:
+            remove_pid_file(DEFAULT_PID_PATH)
+
+    elif action == "start":
+        from claude_standup.service import get_service_manager
+
+        mgr = get_service_manager()
+        binary = shutil.which("claude-standup") or sys.argv[0]
+        mgr.install(binary)
+        print("Daemon installed and started.", file=sys.stderr)
+
+    elif action == "stop":
+        from claude_standup.service import get_service_manager
+
+        mgr = get_service_manager()
+        mgr.uninstall()
+        print("Daemon stopped and uninstalled.", file=sys.stderr)
+
+    elif action == "status":
+        from claude_standup.service import DaemonStatus
+
+        status = DaemonStatus.check()
+        if status.running:
+            print(f"Daemon: running (PID {status.pid})", file=sys.stderr)
+        else:
+            print("Daemon: not running", file=sys.stderr)
+
+    elif action == "uninstall":
+        from claude_standup.service import get_service_manager
+
+        mgr = get_service_manager()
+        mgr.uninstall()
+        print("Daemon uninstalled.", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Status command handler
+# ---------------------------------------------------------------------------
+
+def _handle_status(db: CacheDB, logs_base: str) -> None:
+    """Handle the ``status`` subcommand — show processing statistics."""
+    _process_new_files(db, logs_base, verbose=False)
+
+    total = db.conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+    classified = db.conn.execute(
+        "SELECT count(*) FROM sessions WHERE classified = 1"
+    ).fetchone()[0]
+    pending = total - classified
+    pct = int(classified / total * 100) if total > 0 else 100
+    total_files = db.conn.execute("SELECT count(*) FROM files").fetchone()[0]
+
+    from claude_standup.service import DaemonStatus
+
+    status = DaemonStatus.check()
+    daemon_str = f"running (PID {status.pid})" if status.running else "not running"
+
+    print("Processing status:")
+    print(f"  Files:    {total_files} parsed")
+    print(f"  Sessions: {total} total, {classified} classified, {pending} pending ({pct}%)")
+    print(f"  Daemon:   {daemon_str}")
