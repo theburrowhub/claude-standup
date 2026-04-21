@@ -113,6 +113,7 @@ def parse_jsonl_file(file_path: str, project_name: str) -> list[LogEntry]:
 
                 text_parts: list[str] = []
                 tool_names: list[str] = []
+                tool_descriptions: list[str] = []
 
                 for block in content:
                     if not isinstance(block, dict):
@@ -122,6 +123,10 @@ def parse_jsonl_file(file_path: str, project_name: str) -> list[LogEntry]:
                         text_parts.append(block.get("text", ""))
                     elif block_type == "tool_use":
                         tool_names.append(block.get("name", "unknown"))
+                        # Capture tool description — rich classification signal
+                        desc = block.get("input", {}).get("description", "")
+                        if desc:
+                            tool_descriptions.append(desc)
                     # thinking blocks are silently skipped
 
                 if text_parts:
@@ -143,7 +148,7 @@ def parse_jsonl_file(file_path: str, project_name: str) -> list[LogEntry]:
                             session_id=session_id,
                             project=project_name,
                             entry_type="tool_use",
-                            content="",
+                            content="\n".join(tool_descriptions),
                             cwd=cwd,
                             git_branch=git_branch,
                             tool_names=tool_names,
