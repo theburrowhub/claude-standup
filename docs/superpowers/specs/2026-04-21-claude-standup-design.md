@@ -74,6 +74,8 @@ Responsibilities:
 - Skip: `queue-operation`, `attachment`, `thinking` blocks, `tool_result` content
 - Return normalized records: `(timestamp, session_id, project_name, entry_type, content, cwd, git_branch)`
 - Derive `project_name` from the directory name (strip leading dash, convert dashes to readable form)
+- Resolve git org/repo from `cwd` by running `git -C <cwd> remote get-url origin` (cached per unique cwd path, not per session)
+- Parse remote URL to extract `org` and `repo` (supports both `git@github.com:org/repo.git` and `https://github.com/org/repo.git`)
 - Track file mtime for incremental processing
 
 ### `cache.py` — SQLite Cache
@@ -92,6 +94,8 @@ CREATE TABLE files (
 CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
     project TEXT,
+    git_org TEXT,           -- GitHub organization (e.g. "freepik-company")
+    git_repo TEXT,          -- repository name (e.g. "ai-gateway")
     first_ts TEXT,
     last_ts TEXT
 );
@@ -221,7 +225,8 @@ Commands (positional argument):
 Flags (report commands):
 - `--from YYYY-MM-DD` — start date (overrides command)
 - `--to YYYY-MM-DD` — end date (overrides command)
-- `--project <name>` — filter by project (substring match against project directory name)
+- `--org <name>[,<name>...]` — filter by GitHub organization(s), comma-separated (e.g. `--org freepik-company,theburrowhub`)
+- `--repo <name>[,<name>...]` — filter by repository name(s), comma-separated (e.g. `--repo ai-gateway,bot-data`)
 - `--lang es|en` — report language (default: `es`)
 - `--format markdown|slack` — output format (default: `markdown`)
 - `--output <file>` — write report to file (in addition to stdout)
@@ -230,7 +235,8 @@ Flags (report commands):
 
 Flags (log command):
 - `--type FEATURE|BUGFIX|REFACTOR|DEBUGGING|EXPLORATION|REVIEW|SUPPORT|MEETING|OTHER` — activity type (default: `OTHER`)
-- `--project <name>` — associate with a project
+- `--org <name>` — associate with an organization
+- `--repo <name>` — associate with a repository
 
 Entry point: `claude-standup` (via pyproject.toml console_scripts).
 
@@ -282,7 +288,7 @@ The `log` command allows registering activities that happen outside of Claude Co
 
 ```bash
 # Log a support activity
-claude-standup log "Helped mobile team debug their deploy pipeline" --type SUPPORT --project overmind
+claude-standup log "Helped mobile team debug their deploy pipeline" --type SUPPORT --org overmind-swarm --repo bot-data
 
 # Log a meeting
 claude-standup log "Sprint planning with backend team" --type MEETING
@@ -305,8 +311,14 @@ claude-standup yesterday --lang en
 # Last week, Slack format
 claude-standup last-7-days --format slack
 
-# Custom range, specific project, save to file
-claude-standup --from 2026-04-14 --to 2026-04-21 --project overmind --output standup.md
+# Custom range, filter by org, save to file
+claude-standup --from 2026-04-14 --to 2026-04-21 --org overmind-swarm --output standup.md
+
+# Multiple orgs
+claude-standup last-7-days --org freepik-company,theburrowhub
+
+# Specific repo
+claude-standup today --repo ai-gateway,bot-data
 
 # Reprocess all logs (ignore cache)
 claude-standup --reprocess
