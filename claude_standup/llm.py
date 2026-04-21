@@ -54,7 +54,7 @@ class ClaudeCLIBackend(LLMBackend):
     def query(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096) -> str:
         full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
         result = subprocess.run(
-            [self.claude_path, "-p", full_prompt, "--output-format", "text"],
+            [self.claude_path, "-p", full_prompt, "--output-format", "text", "--no-session-persistence"],
             capture_output=True,
             text=True,
             timeout=300,
