@@ -35,7 +35,15 @@ class CacheDB:
                 git_org TEXT,
                 git_repo TEXT,
                 first_ts TEXT,
-                last_ts TEXT
+                last_ts TEXT,
+                classified INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS raw_prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                timestamp TEXT,
+                content TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
             CREATE TABLE IF NOT EXISTS activities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +114,65 @@ class CacheDB:
             ON CONFLICT(session_id) DO UPDATE SET last_ts = excluded.last_ts
             """,
             (session_id, project, git_org, git_repo, first_ts, last_ts),
+        )
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Raw prompt storage
+    # ------------------------------------------------------------------
+
+    def store_raw_prompts(self, session_id: str, prompts: list[tuple[str, str]]) -> None:
+        """Store raw user prompts for a session. Each prompt is (timestamp, content)."""
+        for ts, content in prompts:
+            self.conn.execute(
+                "INSERT INTO raw_prompts (session_id, timestamp, content) VALUES (?, ?, ?)",
+                (session_id, ts, content),
+            )
+        self.conn.commit()
+
+    def get_unclassified_sessions(self, date_from: str, date_to: str,
+                                   orgs: list[str] | None = None,
+                                   repos: list[str] | None = None) -> list[dict]:
+        """Return unclassified sessions that overlap the given date range."""
+        query = """
+            SELECT session_id, project, git_org, git_repo, first_ts, last_ts
+            FROM sessions
+            WHERE classified = 0
+              AND first_ts IS NOT NULL
+              AND substr(first_ts, 1, 10) <= ?
+              AND substr(last_ts, 1, 10) >= ?
+        """
+        params: list[str] = [date_to, date_from]
+
+        if orgs:
+            placeholders = ",".join("?" for _ in orgs)
+            query += f" AND git_org IN ({placeholders})"
+            params.extend(orgs)
+        if repos:
+            placeholders = ",".join("?" for _ in repos)
+            query += f" AND git_repo IN ({placeholders})"
+            params.extend(repos)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [
+            {"session_id": r[0], "project": r[1], "git_org": r[2],
+             "git_repo": r[3], "first_ts": r[4], "last_ts": r[5]}
+            for r in rows
+        ]
+
+    def get_raw_prompts(self, session_id: str) -> list[tuple[str, str]]:
+        """Return raw prompts for a session as (timestamp, content) tuples."""
+        rows = self.conn.execute(
+            "SELECT timestamp, content FROM raw_prompts WHERE session_id = ? ORDER BY timestamp",
+            (session_id,),
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def mark_session_classified(self, session_id: str) -> None:
+        """Mark a session as classified."""
+        self.conn.execute(
+            "UPDATE sessions SET classified = 1 WHERE session_id = ?",
+            (session_id,),
         )
         self.conn.commit()
 

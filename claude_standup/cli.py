@@ -162,13 +162,15 @@ def resolve_date_range(
 # ---------------------------------------------------------------------------
 
 def _process_new_files(
-    backend,
     db: CacheDB,
     logs_base: str,
     reprocess: bool = False,
     verbose: bool = False,
 ) -> int:
-    """Parse and classify unprocessed JSONL files, storing results in the cache.
+    """Parse unprocessed JSONL files and store sessions + raw prompts in cache.
+
+    This is a local-only operation — no LLM calls. Classification happens
+    lazily when a report is requested for a specific date range.
 
     Returns the number of files processed.
     """
@@ -203,6 +205,7 @@ def _process_new_files(
         first_cwd = entries[0].cwd
         git_info = resolve_git_remote(first_cwd, git_cache) if first_cwd else GitInfo()
 
+        # Group entries by session
         sessions: dict[str, list[LogEntry]] = {}
         for entry in entries:
             sessions.setdefault(entry.session_id, []).append(entry)
@@ -221,15 +224,100 @@ def _process_new_files(
                 last_ts=last_ts,
             )
 
-            activities = classify_session(
-                backend, session_entries, git_org=git_info.org, git_repo=git_info.repo,
-            )
-            if activities:
-                db.store_activities(activities)
+            # Store raw user prompts for lazy classification
+            user_prompts = [
+                (e.timestamp, e.content)
+                for e in session_entries
+                if e.entry_type == "user_prompt"
+            ]
+            if user_prompts:
+                db.store_raw_prompts(session_id, user_prompts)
 
         db.mark_file_processed(fi.path, fi.mtime)
 
     return total
+
+
+def _classify_pending_sessions(
+    backend,
+    db: CacheDB,
+    date_from: str,
+    date_to: str,
+    orgs: list[str] | None = None,
+    repos: list[str] | None = None,
+    verbose: bool = False,
+) -> None:
+    """Classify unclassified sessions that fall within the date range.
+
+    Batches multiple sessions into a single LLM call for efficiency.
+    """
+    unclassified = db.get_unclassified_sessions(date_from, date_to, orgs=orgs, repos=repos)
+    if not unclassified:
+        return
+
+    if verbose:
+        print(f"Sessions to classify: {len(unclassified)}", file=sys.stderr)
+
+    # Batch sessions — group prompts from multiple sessions into one call
+    BATCH_SIZE = 10
+    for batch_start in range(0, len(unclassified), BATCH_SIZE):
+        batch = unclassified[batch_start:batch_start + BATCH_SIZE]
+
+        # Build combined entries for the batch
+        all_entries: list[LogEntry] = []
+        session_boundaries: list[tuple[dict, int, int]] = []  # (session_info, start_idx, end_idx)
+
+        for sess in batch:
+            raw = db.get_raw_prompts(sess["session_id"])
+            if not raw:
+                db.mark_session_classified(sess["session_id"])
+                continue
+
+            start = len(all_entries)
+            for ts, content in raw:
+                all_entries.append(LogEntry(
+                    timestamp=ts,
+                    session_id=sess["session_id"],
+                    project=sess["project"],
+                    entry_type="user_prompt",
+                    content=content,
+                    cwd="",
+                ))
+            session_boundaries.append((sess, start, len(all_entries)))
+
+        if not all_entries:
+            continue
+
+        if verbose:
+            batch_num = batch_start // BATCH_SIZE + 1
+            total_batches = (len(unclassified) + BATCH_SIZE - 1) // BATCH_SIZE
+            print(f"Classifying batch {batch_num}/{total_batches} ({len(all_entries)} prompts)...", file=sys.stderr)
+
+        # Single LLM call for the whole batch
+        activities = classify_session(
+            backend, all_entries,
+            git_org=batch[0]["git_org"],
+            git_repo=batch[0]["git_repo"],
+        )
+
+        # Fix up git_org/git_repo per session (batch may span different repos)
+        if activities:
+            # Map each activity to its session based on prompt indices
+            for act in activities:
+                for sess, start, end in session_boundaries:
+                    # Check if this activity's prompts belong to this session
+                    if any(e.session_id == sess["session_id"] for e in all_entries
+                           if all_entries.index(e) < end and all_entries.index(e) >= start
+                           and e.content in act.raw_prompts):
+                        act.git_org = sess["git_org"]
+                        act.git_repo = sess["git_repo"]
+                        act.project = sess["project"]
+                        break
+
+            db.store_activities(activities)
+
+        for sess, _, _ in session_boundaries:
+            db.mark_session_classified(sess["session_id"])
 
 
 def _run_report_pipeline(
@@ -245,14 +333,16 @@ def _run_report_pipeline(
     if verbose:
         print(f"Date range: {date_from} .. {date_to}", file=sys.stderr)
 
-    _process_new_files(
-        backend, db, logs_base,
-        reprocess=args.reprocess,
-        verbose=verbose,
-    )
+    # Step 1: Parse new files (local, fast)
+    _process_new_files(db, logs_base, reprocess=args.reprocess, verbose=verbose)
 
     orgs = [o.strip() for o in args.org.split(",")] if args.org else None
     repos = [r.strip() for r in args.repo.split(",")] if args.repo else None
+
+    # Step 2: Classify sessions for this date range (lazy, batched LLM calls)
+    _classify_pending_sessions(backend, db, date_from, date_to, orgs=orgs, repos=repos, verbose=verbose)
+
+    # Step 3: Query and generate report
     activities = db.query_activities(date_from, date_to, orgs=orgs, repos=repos)
 
     if verbose:
@@ -311,23 +401,17 @@ def main(
         print(f"Logged: [{args.type}] {args.message}", file=sys.stderr)
         return
 
-    # -- warmup and report commands: require LLM backend ---
-    try:
-        backend = get_llm_backend()
-    except RuntimeError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
     if effective_db_path != ":memory:":
         Path(effective_db_path).parent.mkdir(parents=True, exist_ok=True)
 
     db = CacheDB(effective_db_path)
 
     try:
+        # -- warmup: parse only, no LLM needed ---
         if args.command == "warmup":
             verbose = getattr(args, "verbose", False)
             processed = _process_new_files(
-                backend, db, effective_logs_base,
+                db, effective_logs_base,
                 reprocess=args.reprocess,
                 verbose=verbose,
             )
@@ -336,6 +420,13 @@ def main(
             else:
                 print(f"Warmup complete: {processed} file(s) processed.", file=sys.stderr)
             return
+
+        # -- Report commands: require LLM backend ---
+        try:
+            backend = get_llm_backend()
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
         report = _run_report_pipeline(backend, db, effective_logs_base, args)
         print(report)

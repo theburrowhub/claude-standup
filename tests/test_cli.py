@@ -219,17 +219,20 @@ class TestMain:
         assert "## Report" in captured.out
 
     def test_warmup_processes_files(self, tmp_path, capsys):
-        mock_backend = MagicMock()
-        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
-            with patch("claude_standup.cli._process_new_files", return_value=5):
-                main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
+        with patch("claude_standup.cli._process_new_files", return_value=5):
+            main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
         captured = capsys.readouterr()
         assert "5 file(s) processed" in captured.err
 
     def test_warmup_nothing_to_process(self, tmp_path, capsys):
-        mock_backend = MagicMock()
-        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
-            with patch("claude_standup.cli._process_new_files", return_value=0):
-                main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
+        with patch("claude_standup.cli._process_new_files", return_value=0):
+            main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
         captured = capsys.readouterr()
         assert "up to date" in captured.err
+
+    def test_warmup_no_backend_needed(self, tmp_path, capsys):
+        """warmup should work even without any LLM backend available."""
+        with patch("claude_standup.cli._process_new_files", return_value=3):
+            main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
+        captured = capsys.readouterr()
+        assert "3 file(s) processed" in captured.err
