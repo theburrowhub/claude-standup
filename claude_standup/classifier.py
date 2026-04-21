@@ -123,9 +123,9 @@ def _classify_from_branch(branch: str) -> str | None:
 
 def _classify_from_signals(text: str, tool_names: list[str], branch_hint: str | None) -> str:
     """Classify from all available text signals + tool names."""
-    # Check for review signals first (strongest signal)
-    has_gh_pr = any("gh" in t.lower() and "pr" in t.lower() for t in tool_names)
-    if has_gh_pr or _REVIEW_SIGNALS.search(text):
+    # REVIEW: only if there are strong review signals (PR review/approve actions, not just "fetch")
+    review_actions = re.compile(r"(?i)(gh\s+pr\s+(review|approve|comment)|review\s+pr|revis[ae]\s+(pr|pull)|pull\s*request\s+review|request.changes|lgtm)")
+    if review_actions.search(text):
         return "REVIEW"
 
     if _BUGFIX_SIGNALS.search(text):
@@ -157,19 +157,23 @@ def _build_summary(
     # Best: first user prompt (usually the task description)
     if user_prompts:
         first = user_prompts[0].content.strip()
-        # Clean up noise prefixes
-        first = re.sub(r"^<[^>]+>.*?</[^>]+>\s*", "", first, flags=re.DOTALL).strip()
+        # Clean up XML tags and noise
+        first = re.sub(r"<[^>]+>.*?</[^>]+>", "", first, flags=re.DOTALL).strip()
+        # Take only the first line/sentence
+        first = first.split("\n")[0].strip()
         if len(first) > 10:
             return first[:150].rstrip()
 
     # Fallback: first tool description
     for e in tool_uses:
         if e.content and len(e.content) > 10:
-            return e.content[:150].rstrip()
+            first_desc = e.content.split("\n")[0].strip()
+            return first_desc[:150].rstrip()
 
     # Fallback: first assistant text
     if assistant_texts:
-        return assistant_texts[0].content[:150].rstrip()
+        first_text = assistant_texts[0].content.split("\n")[0].strip()
+        return first_text[:150].rstrip()
 
     return "Activity"
 

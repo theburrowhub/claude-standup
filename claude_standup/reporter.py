@@ -1,12 +1,16 @@
 """Reporter module — generates standup reports from classified activities.
 
-All report generation is local (template-based). No LLM calls.
+Two modes:
+- Template: instant local report (generate_template_report)
+- LLM: one `claude -p` call to polish the report (generate_llm_report)
 """
 
 from __future__ import annotations
 
 import itertools
 import operator
+import shutil
+import subprocess
 
 from claude_standup.models import Activity
 
@@ -115,3 +119,74 @@ def generate_template_report(
     if output_format == "slack":
         return _template_slack(activities, pending_count, lang)
     return _template_markdown(activities, pending_count, lang)
+
+
+# ---------------------------------------------------------------------------
+# LLM-polished report — one `claude -p` call
+# ---------------------------------------------------------------------------
+
+_LLM_REPORT_PROMPT = """\
+You are generating a daily standup report for a software developer.
+
+Below is raw classified activity data from their Claude Code sessions. Your job:
+
+1. Write a clean, concise standup report with sections: Done, Next, Blockers
+2. IGNORE noise: subagent instructions ("You are implementing...", "You are reviewing..."), \
+   internal tool output ("List project directory", "Check git status"), JSON artifacts, and \
+   anything that looks like Claude Code internal machinery rather than actual developer work
+3. MERGE related activities: multiple entries about the same feature/bug = one bullet
+4. Include org/repo and approximate time when available
+5. Infer "Next" from incomplete work patterns
+6. Identify "Blockers" from repeated failures or confusion. If none, say "None"
+7. Write in {lang}
+8. Use {format} formatting
+
+Raw activity data:
+{activities}
+"""
+
+
+def generate_llm_report(
+    activities: list[Activity],
+    output_format: str = "markdown",
+    lang: str = "es",
+) -> str:
+    """Generate a polished standup report using one claude -p call."""
+    if not activities:
+        if lang == "en":
+            return "No activity found for the requested period."
+        return "No se encontró actividad para el período solicitado."
+
+    # Build raw data for the LLM
+    lines = []
+    for act in activities:
+        org_repo = f"({act.git_org}/{act.git_repo})" if act.git_org and act.git_repo else ""
+        time_part = f" ~{act.time_spent_minutes}min" if act.time_spent_minutes else ""
+        lines.append(f"- [{act.day}] [{act.classification}]{org_repo} {act.summary}{time_part}")
+
+    lang_name = "Spanish" if lang == "es" else "English"
+    fmt_name = "Slack (*bold*, • bullets)" if output_format == "slack" else "Markdown (## headers, - bullets)"
+
+    prompt = _LLM_REPORT_PROMPT.format(
+        lang=lang_name,
+        format=fmt_name,
+        activities="\n".join(lines),
+    )
+
+    claude_path = shutil.which("claude")
+    if not claude_path:
+        # Fallback to template if claude not available
+        return generate_template_report(activities, output_format=output_format, lang=lang)
+
+    try:
+        result = subprocess.run(
+            [claude_path, "-p", prompt, "--output-format", "text", "--no-session-persistence"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Fallback to template on any failure
+    return generate_template_report(activities, output_format=output_format, lang=lang)

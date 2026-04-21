@@ -19,7 +19,7 @@ from claude_standup.parser import (
     parse_jsonl_file,
     resolve_git_remote,
 )
-from claude_standup.reporter import generate_template_report
+from claude_standup.reporter import generate_template_report, generate_llm_report
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,6 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     common.add_argument("--lang", choices=["es", "en"], default="es", help="Report language (default: es).")
     common.add_argument("--format", choices=["markdown", "slack"], default="markdown", help="Output format (default: markdown).")
     common.add_argument("--output", default=None, help="Write report to this file path.")
+    common.add_argument("--raw", action="store_true", help="Use local template only (no LLM polish).")
     common.add_argument("--verbose", action="store_true", help="Print progress to stderr.")
 
     parser = argparse.ArgumentParser(
@@ -69,7 +70,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.command is None:
         args.command = "today"
         for key, value in {"date_from": None, "date_to": None, "org": None, "repo": None,
-                           "lang": "es", "format": "markdown", "output": None, "verbose": False}.items():
+                           "lang": "es", "format": "markdown", "output": None, "raw": False, "verbose": False}.items():
             if not hasattr(args, key):
                 setattr(args, key, value)
 
@@ -124,7 +125,10 @@ def _process_and_classify(
 
     # Filter by mtime: skip files not modified since before the date range
     cutoff_ts = datetime.fromisoformat(f"{cutoff_date}T00:00:00+00:00").timestamp()
-    recent_files = [f for f in all_files if f.mtime >= cutoff_ts]
+    recent_files = [
+        f for f in all_files
+        if f.mtime >= cutoff_ts and "/subagents/" not in f.path
+    ]
 
     if verbose:
         print(f"Files modified since {cutoff_date}: {len(recent_files)}", file=sys.stderr)
@@ -193,7 +197,12 @@ def _run_report(db: CacheDB, logs_base: str, args: argparse.Namespace) -> str:
     if verbose:
         print(f"Activities found: {len(activities)}", file=sys.stderr)
 
-    return generate_template_report(activities, output_format=args.format, lang=args.lang)
+    use_raw = getattr(args, "raw", False)
+    if use_raw:
+        return generate_template_report(activities, output_format=args.format, lang=args.lang)
+
+    # Default: LLM polishes the report (1 call, cleans noise, writes proper standup)
+    return generate_llm_report(activities, output_format=args.format, lang=args.lang)
 
 
 # ---------------------------------------------------------------------------
