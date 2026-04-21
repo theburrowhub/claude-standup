@@ -224,8 +224,11 @@ class DaemonRunner:
 
     # -- classification cycle -----------------------------------------------
 
+    BATCH_SIZE = 10
+    MAX_WORKERS = 4
+
     def classify_pending(self) -> int:
-        """Classify all unclassified sessions. Returns count of sessions classified."""
+        """Classify unclassified sessions in batches with parallel workers."""
         if self.backend is None:
             return 0
 
@@ -235,63 +238,102 @@ class DaemonRunner:
             if not sessions:
                 return 0
 
-            count = 0
+            # Build batches: group sessions into chunks, each chunk = 1 LLM call
+            batches: list[list[tuple[dict, list[LogEntry]]]] = []
+            current_batch: list[tuple[dict, list[LogEntry]]] = []
+
             for sess in sessions:
-                if not self.should_run:
-                    break
-
-                session_id = sess["session_id"]
-                project = sess["project"]
-                git_org = sess["git_org"]
-                git_repo = sess["git_repo"]
-
-                # Reconstruct LogEntry objects from stored raw prompts
-                raw_prompts = db.get_raw_prompts(session_id)
-                if not raw_prompts:
-                    # No prompts to classify — mark classified to avoid infinite retries
-                    db.mark_session_classified(session_id)
-                    count += 1
+                raw = db.get_raw_prompts(sess["session_id"])
+                if not raw:
+                    db.mark_session_classified(sess["session_id"])
                     continue
 
                 entries = [
                     LogEntry(
-                        timestamp=ts,
-                        session_id=session_id,
-                        project=project,
-                        entry_type="user_prompt",
-                        content=content,
-                        cwd="",
+                        timestamp=ts, session_id=sess["session_id"],
+                        project=sess["project"], entry_type="user_prompt",
+                        content=content, cwd="",
                     )
-                    for ts, content in raw_prompts
+                    for ts, content in raw
                 ]
+                current_batch.append((sess, entries))
 
-                try:
-                    activities = classify_session(
-                        self.backend, entries, git_org, git_repo
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to classify session %s — will retry next cycle.",
-                        session_id,
-                        exc_info=True,
-                    )
-                    continue
+                if len(current_batch) >= self.BATCH_SIZE:
+                    batches.append(current_batch)
+                    current_batch = []
 
-                if not activities:
-                    # Empty result — could be legitimate (noise-only session)
-                    # or transient failure. Mark as classified to avoid infinite retry.
-                    logger.info(
-                        "No activities for session %s — marking as classified.",
-                        session_id,
-                    )
-                    db.mark_session_classified(session_id)
-                    count += 1
-                    continue
+            if current_batch:
+                batches.append(current_batch)
 
-                db.store_activities(activities)
-                db.mark_session_classified(session_id)
-                count += 1
+            if not batches:
+                return 0
 
+            logger.info(
+                "Classifying %d session(s) in %d batch(es) with %d worker(s)...",
+                sum(len(b) for b in batches), len(batches), self.MAX_WORKERS,
+            )
+
+            count = 0
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as pool:
+                futures = {
+                    pool.submit(self._classify_batch, batch): batch
+                    for batch in batches
+                }
+                for future in as_completed(futures):
+                    if not self.should_run:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        break
+                    batch = futures[future]
+                    try:
+                        batch_count = future.result()
+                        count += batch_count
+                    except Exception:
+                        logger.warning("Batch classification failed.", exc_info=True)
+
+            # Mark all processed sessions in DB (thread-safe: single writer after pool done)
             return count
+        finally:
+            db.close()
+
+    def _classify_batch(self, batch: list[tuple[dict, list[LogEntry]]]) -> int:
+        """Classify a batch of sessions in a single LLM call. Returns sessions classified."""
+        # Merge all entries from the batch into one prompt
+        all_entries: list[LogEntry] = []
+        for _sess, entries in batch:
+            all_entries.extend(entries)
+
+        try:
+            activities = classify_session(
+                self.backend, all_entries,
+                git_org=batch[0][0]["git_org"],
+                git_repo=batch[0][0]["git_repo"],
+            )
+        except Exception:
+            logger.warning("Batch classify_session failed.", exc_info=True)
+            activities = []
+
+        # Fix up org/repo per activity based on session_id
+        session_map = {sess["session_id"]: sess for sess, _ in batch}
+        for act in activities:
+            sess_info = session_map.get(act.session_id)
+            if sess_info:
+                act.git_org = sess_info["git_org"]
+                act.git_repo = sess_info["git_repo"]
+                act.project = sess_info["project"]
+
+        # Store results — each batch gets its own DB connection for thread safety
+        db = CacheDB(self.db_path)
+        try:
+            if activities:
+                db.store_activities(activities)
+            for sess, _ in batch:
+                db.mark_session_classified(sess["session_id"])
+            logger.info(
+                "Batch done: %d session(s), %d activit(ies).",
+                len(batch), len(activities),
+            )
+            return len(batch)
         finally:
             db.close()
