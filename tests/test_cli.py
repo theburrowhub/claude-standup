@@ -100,6 +100,15 @@ class TestParseArgs:
         assert args.message == "Helped QA team"
         assert args.type == "SUPPORT"
 
+    def test_warmup_command(self):
+        args = parse_args(["warmup"])
+        assert args.command == "warmup"
+
+    def test_warmup_with_verbose(self):
+        args = parse_args(["warmup", "--verbose"])
+        assert args.command == "warmup"
+        assert args.verbose is True
+
     def test_log_type_default(self):
         args = parse_args(["log", "Something"])
         assert args.type == "OTHER"
@@ -208,3 +217,19 @@ class TestMain:
 
         captured = capsys.readouterr()
         assert "## Report" in captured.out
+
+    def test_warmup_processes_files(self, tmp_path, capsys):
+        mock_backend = MagicMock()
+        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
+            with patch("claude_standup.cli._process_new_files", return_value=5):
+                main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
+        captured = capsys.readouterr()
+        assert "5 file(s) processed" in captured.err
+
+    def test_warmup_nothing_to_process(self, tmp_path, capsys):
+        mock_backend = MagicMock()
+        with patch("claude_standup.cli.get_llm_backend", return_value=mock_backend):
+            with patch("claude_standup.cli._process_new_files", return_value=0):
+                main(["warmup"], logs_base=str(tmp_path), db_path=":memory:")
+        captured = capsys.readouterr()
+        assert "up to date" in captured.err

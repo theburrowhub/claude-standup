@@ -82,6 +82,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("today", parents=[common], help="Report for today.")
     subparsers.add_parser("yesterday", parents=[common], help="Report for yesterday.")
     subparsers.add_parser("last-7-days", parents=[common], help="Report for the last 7 days.")
+    subparsers.add_parser("warmup", parents=[common], help="Pre-process all logs into cache (run once).")
 
     log_parser = subparsers.add_parser("log", parents=[common], help="Add a manual activity entry.")
     log_parser.add_argument("message", help="Activity description.")
@@ -160,65 +161,48 @@ def resolve_date_range(
 # Report pipeline
 # ---------------------------------------------------------------------------
 
-def _run_report_pipeline(
+def _process_new_files(
     backend,
     db: CacheDB,
     logs_base: str,
-    args: argparse.Namespace,
-) -> str:
-    """Execute the full report pipeline and return the formatted report text.
+    reprocess: bool = False,
+    verbose: bool = False,
+) -> int:
+    """Parse and classify unprocessed JSONL files, storing results in the cache.
 
-    Steps:
-    1. Resolve date range from command / flags.
-    2. Discover JSONL files, filter to unprocessed (clear tracking if reprocess).
-    3. Parse each file: derive project name, handle subagent paths, resolve git remote.
-    4. Group entries by session, store session, classify, store activities.
-    5. Query activities with org/repo filters.
-    6. Generate and return the report.
+    Returns the number of files processed.
     """
-    verbose = getattr(args, "verbose", False)
-
-    # 1. Resolve dates
-    date_from, date_to = resolve_date_range(args.command, args.date_from, args.date_to)
-    if verbose:
-        print(f"Date range: {date_from} .. {date_to}", file=sys.stderr)
-
-    # 2. Discover files
     all_files = discover_jsonl_files(logs_base)
     if verbose:
         print(f"Discovered {len(all_files)} JSONL file(s).", file=sys.stderr)
 
-    if args.reprocess:
+    if reprocess:
         db.clear_file_tracking()
 
     files_to_process = db.get_unprocessed_files(all_files)
+    total = len(files_to_process)
     if verbose:
-        print(f"Files to process: {len(files_to_process)}", file=sys.stderr)
+        print(f"Files to process: {total}", file=sys.stderr)
 
-    # 3 & 4. Parse, group, classify, store
     git_cache: dict[str, GitInfo] = {}
 
-    for fi in files_to_process:
-        # Derive project name from directory
+    for idx, fi in enumerate(files_to_process, 1):
         dir_name = Path(fi.path).parent.name
-        # Handle subagent paths: if parent is a UUID-like dir, go up one more
         if _looks_like_subagent_dir(dir_name):
             dir_name = Path(fi.path).parent.parent.name
         project = derive_project_name(dir_name)
 
         if verbose:
-            print(f"Parsing {fi.path} (project={project})", file=sys.stderr)
+            print(f"[{idx}/{total}] {project or '(subagent)'}: {Path(fi.path).name}", file=sys.stderr)
 
         entries = parse_jsonl_file(fi.path, project)
         if not entries:
             db.mark_file_processed(fi.path, fi.mtime)
             continue
 
-        # Resolve git remote from the first entry's cwd
         first_cwd = entries[0].cwd
         git_info = resolve_git_remote(first_cwd, git_cache) if first_cwd else GitInfo()
 
-        # Group entries by session
         sessions: dict[str, list[LogEntry]] = {}
         for entry in entries:
             sessions.setdefault(entry.session_id, []).append(entry)
@@ -245,7 +229,28 @@ def _run_report_pipeline(
 
         db.mark_file_processed(fi.path, fi.mtime)
 
-    # 5. Query with org/repo filters
+    return total
+
+
+def _run_report_pipeline(
+    backend,
+    db: CacheDB,
+    logs_base: str,
+    args: argparse.Namespace,
+) -> str:
+    """Execute the full report pipeline and return the formatted report text."""
+    verbose = getattr(args, "verbose", False)
+
+    date_from, date_to = resolve_date_range(args.command, args.date_from, args.date_to)
+    if verbose:
+        print(f"Date range: {date_from} .. {date_to}", file=sys.stderr)
+
+    _process_new_files(
+        backend, db, logs_base,
+        reprocess=args.reprocess,
+        verbose=verbose,
+    )
+
     orgs = [o.strip() for o in args.org.split(",")] if args.org else None
     repos = [r.strip() for r in args.repo.split(",")] if args.repo else None
     activities = db.query_activities(date_from, date_to, orgs=orgs, repos=repos)
@@ -253,7 +258,6 @@ def _run_report_pipeline(
     if verbose:
         print(f"Activities found: {len(activities)}", file=sys.stderr)
 
-    # 6. Generate report
     report = generate_report(backend, activities, lang=args.lang, output_format=args.format)
     return report
 
@@ -307,7 +311,7 @@ def main(
         print(f"Logged: [{args.type}] {args.message}", file=sys.stderr)
         return
 
-    # -- Report commands: require LLM backend ---
+    # -- warmup and report commands: require LLM backend ---
     try:
         backend = get_llm_backend()
     except RuntimeError as e:
@@ -320,6 +324,19 @@ def main(
     db = CacheDB(effective_db_path)
 
     try:
+        if args.command == "warmup":
+            verbose = getattr(args, "verbose", False)
+            processed = _process_new_files(
+                backend, db, effective_logs_base,
+                reprocess=args.reprocess,
+                verbose=verbose,
+            )
+            if processed == 0:
+                print("Cache is up to date — nothing to process.", file=sys.stderr)
+            else:
+                print(f"Warmup complete: {processed} file(s) processed.", file=sys.stderr)
+            return
+
         report = _run_report_pipeline(backend, db, effective_logs_base, args)
         print(report)
 
