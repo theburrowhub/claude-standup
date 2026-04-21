@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -247,77 +248,65 @@ def _classify_pending_sessions(
     repos: list[str] | None = None,
     verbose: bool = False,
 ) -> None:
-    """Classify unclassified sessions that fall within the date range.
-
-    Batches multiple sessions into a single LLM call for efficiency.
-    """
+    """Classify unclassified sessions in the date range using parallel threads."""
     unclassified = db.get_unclassified_sessions(date_from, date_to, orgs=orgs, repos=repos)
     if not unclassified:
         return
 
-    if verbose:
-        print(f"Sessions to classify: {len(unclassified)}", file=sys.stderr)
-
-    # Batch sessions — group prompts from multiple sessions into one call
-    BATCH_SIZE = 10
-    for batch_start in range(0, len(unclassified), BATCH_SIZE):
-        batch = unclassified[batch_start:batch_start + BATCH_SIZE]
-
-        # Build combined entries for the batch
-        all_entries: list[LogEntry] = []
-        session_boundaries: list[tuple[dict, int, int]] = []  # (session_info, start_idx, end_idx)
-
-        for sess in batch:
-            raw = db.get_raw_prompts(sess["session_id"])
-            if not raw:
-                db.mark_session_classified(sess["session_id"])
-                continue
-
-            start = len(all_entries)
-            for ts, content in raw:
-                all_entries.append(LogEntry(
-                    timestamp=ts,
-                    session_id=sess["session_id"],
-                    project=sess["project"],
-                    entry_type="user_prompt",
-                    content=content,
-                    cwd="",
-                ))
-            session_boundaries.append((sess, start, len(all_entries)))
-
-        if not all_entries:
-            continue
-
-        if verbose:
-            batch_num = batch_start // BATCH_SIZE + 1
-            total_batches = (len(unclassified) + BATCH_SIZE - 1) // BATCH_SIZE
-            print(f"Classifying batch {batch_num}/{total_batches} ({len(all_entries)} prompts)...", file=sys.stderr)
-
-        # Single LLM call for the whole batch
-        activities = classify_session(
-            backend, all_entries,
-            git_org=batch[0]["git_org"],
-            git_repo=batch[0]["git_repo"],
-        )
-
-        # Fix up git_org/git_repo per session (batch may span different repos)
-        if activities:
-            # Map each activity to its session based on prompt indices
-            for act in activities:
-                for sess, start, end in session_boundaries:
-                    # Check if this activity's prompts belong to this session
-                    if any(e.session_id == sess["session_id"] for e in all_entries
-                           if all_entries.index(e) < end and all_entries.index(e) >= start
-                           and e.content in act.raw_prompts):
-                        act.git_org = sess["git_org"]
-                        act.git_repo = sess["git_repo"]
-                        act.project = sess["project"]
-                        break
-
-            db.store_activities(activities)
-
-        for sess, _, _ in session_boundaries:
+    # Build per-session entry lists, filtering prompts to the date range
+    session_jobs: list[tuple[dict, list[LogEntry]]] = []
+    for sess in unclassified:
+        raw = db.get_raw_prompts(sess["session_id"], date_from=date_from, date_to=date_to)
+        if not raw:
             db.mark_session_classified(sess["session_id"])
+            continue
+        entries = [
+            LogEntry(timestamp=ts, session_id=sess["session_id"],
+                     project=sess["project"], entry_type="user_prompt",
+                     content=content, cwd="")
+            for ts, content in raw
+        ]
+        session_jobs.append((sess, entries))
+
+    if not session_jobs:
+        return
+
+    total_prompts = sum(len(e) for _, e in session_jobs)
+    if verbose:
+        print(f"Classifying {total_prompts} prompts from {len(session_jobs)} session(s)...", file=sys.stderr)
+
+    def _classify_one(sess_entries: tuple[dict, list[LogEntry]]) -> tuple[str, list[Activity]]:
+        sess, entries = sess_entries
+        activities = classify_session(
+            backend, entries,
+            git_org=sess["git_org"], git_repo=sess["git_repo"],
+        )
+        for act in activities:
+            act.project = sess["project"]
+        return sess["session_id"], activities
+
+    all_activities: list[Activity] = []
+    classified_ids: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_classify_one, job): job[0]["session_id"] for job in session_jobs}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            sid = futures[future]
+            try:
+                session_id, activities = future.result()
+                all_activities.extend(activities)
+                classified_ids.append(session_id)
+                if verbose:
+                    print(f"  [{done}/{len(session_jobs)}] {session_id[:8]}...", file=sys.stderr)
+            except Exception:
+                classified_ids.append(sid)
+
+    if all_activities:
+        db.store_activities(all_activities)
+    for sid in classified_ids:
+        db.mark_session_classified(sid)
 
 
 def _run_report_pipeline(

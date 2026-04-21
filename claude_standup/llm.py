@@ -57,7 +57,7 @@ class ClaudeCLIBackend(LLMBackend):
             [self.claude_path, "-p", full_prompt, "--output-format", "text"],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
         )
         if result.returncode != 0:
             raise RuntimeError(f"claude CLI failed (exit {result.returncode}): {result.stderr[:500]}")

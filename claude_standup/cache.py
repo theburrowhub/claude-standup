@@ -160,12 +160,22 @@ class CacheDB:
             for r in rows
         ]
 
-    def get_raw_prompts(self, session_id: str) -> list[tuple[str, str]]:
-        """Return raw prompts for a session as (timestamp, content) tuples."""
-        rows = self.conn.execute(
-            "SELECT timestamp, content FROM raw_prompts WHERE session_id = ? ORDER BY timestamp",
-            (session_id,),
-        ).fetchall()
+    def get_raw_prompts(self, session_id: str, date_from: str | None = None,
+                        date_to: str | None = None) -> list[tuple[str, str]]:
+        """Return raw prompts for a session as (timestamp, content) tuples.
+
+        If date_from/date_to are provided, only return prompts within that range.
+        """
+        query = "SELECT timestamp, content FROM raw_prompts WHERE session_id = ?"
+        params: list[str] = [session_id]
+        if date_from:
+            query += " AND substr(timestamp, 1, 10) >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND substr(timestamp, 1, 10) <= ?"
+            params.append(date_to)
+        query += " ORDER BY timestamp"
+        rows = self.conn.execute(query, params).fetchall()
         return [(r[0], r[1]) for r in rows]
 
     def mark_session_classified(self, session_id: str) -> None:
