@@ -127,21 +127,21 @@ def _parse_classification_response(
         logger.warning("Missing 'activities' key in classification response.")
         return []
 
-    day = entries[0].timestamp[:10] if entries else ""
-
     activities: list[Activity] = []
     for item in data["activities"]:
         indices = item.get("prompt_indices", [])
-        raw_prompts = [
-            entries[i].content
-            for i in indices
-            if 0 <= i < len(entries)
-        ]
+        valid_indices = [i for i in indices if 0 <= i < len(entries)]
+        raw_prompts = [entries[i].content for i in valid_indices]
+
+        # Use the first referenced entry for session_id and day
+        ref_entry = entries[valid_indices[0]] if valid_indices else (entries[0] if entries else None)
+        if ref_entry is None:
+            continue
 
         activities.append(
             Activity(
-                session_id=entries[0].session_id if entries else "",
-                day=day,
+                session_id=ref_entry.session_id,
+                day=ref_entry.timestamp[:10],
                 project=project,
                 git_org=git_org,
                 git_repo=git_repo,
