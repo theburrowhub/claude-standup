@@ -250,12 +250,17 @@ CLI flow:
 
 ## Dependencies
 
-- `anthropic` — Anthropic Python SDK (only external dependency)
+Runtime:
+- `anthropic` — Anthropic Python SDK (only external runtime dependency)
 - `sqlite3` — stdlib
 - `argparse` — stdlib
 - `json` — stdlib
 - `pathlib` — stdlib
 - `datetime` — stdlib
+
+Dev/Test:
+- `pytest` — test framework
+- `pytest-cov` — coverage reporting
 
 ## Project Structure
 
@@ -268,6 +273,21 @@ claude-standup/
 │   ├── cache.py
 │   ├── classifier.py
 │   └── reporter.py
+├── tests/
+│   ├── conftest.py
+│   ├── fixtures/
+│   │   ├── valid_session.jsonl
+│   │   ├── malformed_lines.jsonl
+│   │   ├── empty_session.jsonl
+│   │   ├── multi_session.jsonl
+│   │   ├── tool_heavy_session.jsonl
+│   │   └── manual_entries.jsonl
+│   ├── test_parser.py
+│   ├── test_cache.py
+│   ├── test_classifier.py
+│   ├── test_reporter.py
+│   ├── test_cli.py
+│   └── test_integration.py
 ├── pyproject.toml
 └── docs/
     └── superpowers/
@@ -331,3 +351,186 @@ claude-standup --reprocess
 - **Malformed JSONL lines**: skip silently, log count of skipped lines in verbose mode
 - **Very large sessions**: truncate prompt list to fit API context window (keep first and last prompts, summarize middle)
 - **No internet**: fail gracefully with cached data if available, error if no cache exists
+
+## Testing Strategy
+
+Framework: **pytest** with `pytest-cov` for coverage.
+
+### Design for Testability
+
+Every module is designed so its dependencies can be injected or overridden:
+
+- **`parser.py`** — takes a base path as argument (not hardcoded `~/.claude`). All file I/O through a discoverable path, no globals.
+- **`cache.py`** — takes a database path as argument. Tests use `:memory:` or `tmp_path` SQLite databases. Exposes a `CacheDB` class, not module-level functions.
+- **`classifier.py`** — takes an `anthropic.Anthropic` client as argument. Tests inject a mock client. The classifier is a class or function that receives the client, never instantiates it internally.
+- **`reporter.py`** — same pattern as classifier: receives client as argument. Report formatting functions are pure (input data → output string) and tested independently from the API call.
+- **`cli.py`** — uses a `main(argv=None)` signature so tests can pass synthetic argument lists. stdout capture via `capsys` or `StringIO`.
+
+### Test Structure
+
+```
+tests/
+├── conftest.py              # Shared fixtures
+├── fixtures/                # Sample JSONL data files
+│   ├── valid_session.jsonl
+│   ├── malformed_lines.jsonl
+│   ├── empty_session.jsonl
+│   ├── multi_session.jsonl
+│   ├── tool_heavy_session.jsonl
+│   └── manual_entries.jsonl
+├── test_parser.py
+├── test_cache.py
+├── test_classifier.py
+├── test_reporter.py
+├── test_cli.py
+└── test_integration.py
+```
+
+### Fixtures (`conftest.py`)
+
+```python
+@pytest.fixture
+def sample_jsonl(tmp_path):
+    """Creates a temporary directory structure mimicking ~/.claude/projects/ with sample JSONL files."""
+
+@pytest.fixture
+def cache_db(tmp_path):
+    """Returns a CacheDB instance backed by a temporary SQLite database."""
+
+@pytest.fixture
+def mock_anthropic_client():
+    """Returns a mock anthropic.Anthropic client with pre-configured responses."""
+
+@pytest.fixture
+def classified_activities():
+    """Returns a list of pre-classified Activity objects for reporter tests."""
+```
+
+### Test Coverage by Module
+
+#### `test_parser.py`
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_discover_jsonl_files` | Finds all `.jsonl` files recursively, ignores other files |
+| `test_parse_valid_session` | Extracts user prompts and assistant text from well-formed JSONL |
+| `test_skip_malformed_lines` | Malformed JSON lines are skipped without crashing, count reported |
+| `test_skip_queue_operations` | `type=queue-operation` entries are ignored |
+| `test_skip_attachments` | `type=attachment` entries are ignored |
+| `test_skip_tool_results` | User entries with `toolUseResult` / array content are skipped |
+| `test_skip_thinking_blocks` | Assistant `thinking` blocks are excluded from content |
+| `test_extract_tool_use_names` | Tool names from `tool_use` blocks are captured |
+| `test_extract_metadata` | timestamp, sessionId, cwd, gitBranch correctly extracted |
+| `test_derive_project_name` | Directory name converted to readable project name |
+| `test_resolve_git_org_repo` | Parses SSH and HTTPS remote URLs into org/repo |
+| `test_resolve_git_org_repo_no_remote` | Handles directories without git remote gracefully (org/repo = None) |
+| `test_resolve_git_org_repo_cached` | Same cwd path only calls git once |
+| `test_empty_file` | Empty JSONL file produces no entries |
+| `test_file_mtime_tracking` | Returns mtime alongside file path for cache comparison |
+
+#### `test_cache.py`
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_create_schema` | Database tables created on first init |
+| `test_mark_file_processed` | File path + mtime stored correctly |
+| `test_detect_new_files` | Files not in DB are flagged for processing |
+| `test_detect_modified_files` | Files with changed mtime are flagged for reprocessing |
+| `test_skip_unchanged_files` | Files with same mtime are not reprocessed |
+| `test_store_session` | Session metadata (project, org, repo, timestamps) stored |
+| `test_store_activities` | Activities with all fields stored and retrievable |
+| `test_query_by_date_range` | Activities filtered by day column |
+| `test_query_by_org` | Activities filtered by git_org (single and multiple values) |
+| `test_query_by_repo` | Activities filtered by git_repo (single and multiple values) |
+| `test_query_by_org_and_repo` | Combined org + repo filtering |
+| `test_store_manual_entry` | Manual activities stored with session_id="manual" |
+| `test_reprocess_clears_file_tracking` | `--reprocess` flag clears files table |
+| `test_concurrent_access` | Two CacheDB instances on same file don't corrupt data |
+
+#### `test_classifier.py`
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_classify_feature_session` | Session about building new functionality classified as FEATURE |
+| `test_classify_bugfix_session` | Debugging + fix session classified as BUGFIX |
+| `test_classify_review_session` | PR review session classified as REVIEW |
+| `test_classify_mixed_session` | Session with multiple activities produces multiple classifications |
+| `test_noise_filtering` | Short confirmations ("yes", "continue") are excluded |
+| `test_merge_related_prompts` | Sequential prompts about same task merged into one activity |
+| `test_extract_files` | File paths mentioned in prompts are captured |
+| `test_extract_technologies` | Technology names detected from content |
+| `test_time_estimation` | Time spent estimated from timestamp gaps |
+| `test_api_error_retry` | Rate limit errors trigger exponential backoff retry |
+| `test_api_error_fatal` | Non-retryable errors raise clean exception |
+| `test_large_session_truncation` | Sessions exceeding context window are truncated safely |
+| `test_structured_response_parsing` | Claude's JSON response parsed into Activity objects |
+| `test_malformed_api_response` | Graceful handling if Claude returns unexpected format |
+
+#### `test_reporter.py`
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_markdown_format` | Output matches expected Markdown structure (headers, bullets) |
+| `test_slack_format` | Output uses Slack formatting (*bold*, bullet •) |
+| `test_language_es` | Report generated in Spanish |
+| `test_language_en` | Report generated in English |
+| `test_single_day_report` | Report for one day has correct Yesterday/Today/Blockers |
+| `test_multi_day_report` | Multi-day range produces per-day sections |
+| `test_includes_manual_entries` | Manual log entries appear in report alongside Claude activities |
+| `test_empty_period` | No activities produces "No activity found" message |
+| `test_file_output` | Report written to file when --output specified |
+| `test_stdout_and_file` | Report goes to both stdout and file simultaneously |
+| `test_activities_grouped_by_project` | Activities grouped by org/repo within each day |
+| `test_most_active_project_highlighted` | Most active project per day is identified |
+
+#### `test_cli.py`
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_today_command` | `today` resolves to current date range |
+| `test_yesterday_command` | `yesterday` resolves to previous day |
+| `test_last_7_days_command` | `last-7-days` resolves to correct 7-day range |
+| `test_custom_date_range` | `--from` and `--to` override command dates |
+| `test_default_command` | No command defaults to `today` |
+| `test_log_command` | `log "message"` stores manual activity |
+| `test_log_with_type` | `--type SUPPORT` sets classification |
+| `test_log_with_org_repo` | `--org` and `--repo` set metadata |
+| `test_org_filter_multiple` | `--org a,b` parsed into list |
+| `test_repo_filter_multiple` | `--repo a,b` parsed into list |
+| `test_format_flag` | `--format slack` selects Slack output |
+| `test_lang_flag` | `--lang en` selects English |
+| `test_output_flag` | `--output file.md` writes to file |
+| `test_reprocess_flag` | `--reprocess` clears cache before run |
+| `test_missing_api_key` | Clear error when ANTHROPIC_API_KEY not set |
+| `test_verbose_flag` | `--verbose` enables progress output |
+
+#### `test_integration.py`
+
+End-to-end tests using fixture JSONL files, in-memory SQLite, and mocked Anthropic client:
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_full_pipeline_today` | parse → cache → classify → report produces valid Markdown |
+| `test_full_pipeline_with_manual_entries` | Manual + Claude activities merged in final report |
+| `test_full_pipeline_org_filter` | Org filter applied through entire pipeline |
+| `test_full_pipeline_reprocess` | Reprocess flag triggers full re-parse and re-classify |
+| `test_incremental_processing` | Second run only processes new/modified files |
+| `test_empty_logs_directory` | Graceful output when no JSONL files exist |
+
+### Running Tests
+
+```bash
+# All tests
+pytest
+
+# With coverage
+pytest --cov=claude_standup --cov-report=term-missing
+
+# Specific module
+pytest tests/test_parser.py -v
+```
+
+### Coverage Target
+
+100% line coverage on `parser.py`, `cache.py`, `cli.py` (pure logic, no excuses).
+90%+ on `classifier.py` and `reporter.py` (API interaction boundaries mocked).
