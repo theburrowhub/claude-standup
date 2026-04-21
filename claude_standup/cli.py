@@ -445,6 +445,19 @@ def _handle_daemon(
         if effective_db_path != ":memory:":
             Path(effective_db_path).parent.mkdir(parents=True, exist_ok=True)
 
+        # Configure logging so daemon output goes to stderr and log file
+        import logging
+        log_handler = logging.StreamHandler(sys.stderr)
+        log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        file_handler = logging.FileHandler(
+            str(Path(effective_db_path).parent / "daemon.log")
+        )
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        root_logger = logging.getLogger("claude_standup")
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(log_handler)
+        root_logger.addHandler(file_handler)
+
         write_pid_file(DEFAULT_PID_PATH, os.getpid())
         try:
             runner = DaemonRunner(effective_db_path, effective_logs_base, backend)

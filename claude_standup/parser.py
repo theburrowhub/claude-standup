@@ -10,6 +10,35 @@ from pathlib import Path
 
 from claude_standup.models import FileInfo, GitInfo, LogEntry
 
+# Prompts shorter than this are almost always noise (confirmations, single words)
+_MIN_PROMPT_LENGTH = 5
+
+# Exact-match noise prompts
+_NOISE_EXACT = frozenset({
+    "y", "n", "yes", "no", "ok", "sure", "continue", "go", "go ahead",
+    "si", "sí", "vale", "dale", "warmup", "clear",
+})
+
+# Prefix patterns that indicate system/hook prompts, not user intent
+_NOISE_PREFIXES = (
+    "<command-name>",
+    "<command-message>",
+    "You receive a CLI command",
+)
+
+
+def _is_noise_prompt(content: str) -> bool:
+    """Return True if *content* is a trivial/noise prompt that should be skipped."""
+    stripped = content.strip()
+    if len(stripped) < _MIN_PROMPT_LENGTH:
+        return True
+    if stripped.lower() in _NOISE_EXACT:
+        return True
+    for prefix in _NOISE_PREFIXES:
+        if stripped.startswith(prefix):
+            return True
+    return False
+
 
 def discover_jsonl_files(base_path: Path | str) -> list[FileInfo]:
     """Recursively find .jsonl files under *base_path*, returning each with its mtime."""
@@ -62,6 +91,9 @@ def parse_jsonl_file(file_path: str, project_name: str) -> list[LogEntry]:
                     continue
                 # Only accept string content (not list/array content)
                 if not isinstance(content, str):
+                    continue
+                # Skip noise: trivial prompts, internal commands, system hooks
+                if _is_noise_prompt(content):
                     continue
                 entries.append(
                     LogEntry(

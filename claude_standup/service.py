@@ -70,6 +70,11 @@ class LaunchdManager:
                     <string>daemon</string>
                     <string>run</string>
                 </array>
+                <key>EnvironmentVariables</key>
+                <dict>
+                    <key>PATH</key>
+                    <string>{os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")}</string>
+                </dict>
                 <key>RunAtLoad</key>
                 <true/>
                 <key>KeepAlive</key>

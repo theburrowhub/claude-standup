@@ -278,15 +278,14 @@ class DaemonRunner:
                     continue
 
                 if not activities:
-                    # classify_session returns [] on internal failures (e.g.
-                    # API errors it catches itself).  When there are real
-                    # prompts but no activities came back, treat it as a
-                    # transient failure and retry next cycle.
-                    logger.warning(
-                        "Classification returned no activities for session %s "
-                        "— will retry next cycle.",
+                    # Empty result — could be legitimate (noise-only session)
+                    # or transient failure. Mark as classified to avoid infinite retry.
+                    logger.info(
+                        "No activities for session %s — marking as classified.",
                         session_id,
                     )
+                    db.mark_session_classified(session_id)
+                    count += 1
                     continue
 
                 db.store_activities(activities)
