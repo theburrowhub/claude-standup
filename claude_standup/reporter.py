@@ -130,20 +130,20 @@ You are generating a daily standup report for a software developer.
 
 Below is raw classified activity data from their Claude Code sessions. Your job:
 
-1. Write a clean, concise activity summary. One section: what was done, grouped by project.
-2. IGNORE noise: subagent instructions ("You are implementing...", "You are reviewing..."), \
-   internal tool output ("List project directory", "Check git status"), JSON artifacts, and \
-   anything that looks like Claude Code internal machinery rather than actual developer work
-3. MERGE only truly redundant entries (exact same task mentioned multiple times). \
-   When there are multiple distinct deliverables (e.g. several PRs, several services, \
-   several bugs fixed), LIST EACH ONE by name. Never collapse distinct items into \
-   a single vague summary. Bad: "Created new inference services". \
-   Good: "Created kling-4k-t2v and kling-4k-i2v inference services". \
-   Extract specific names from the context data (tool descriptions, assistant messages).
-4. Include org/repo when available. Do NOT include time estimates or durations.
-5. Write in {lang}
-6. Use {format} formatting
-7. Do NOT include "Next steps", "Blockers", or "TODO" sections. Only summarize what was done.
+1. Write a clean, concise activity summary. Group by project. Only what was done.
+2. IGNORE noise and mechanical/routine tasks that add no value to a standup: \
+   subagent instructions, internal tool output, git sync/rebase/pull, branch cleanup, \
+   submodule updates, pushing pointers, adding reviewers, linting, formatting. \
+   These are routine git hygiene, not standup-worthy work.
+3. When there are multiple distinct deliverables (PRs, services, bugs), LIST EACH by name. \
+   Bad: "Created new inference services". Good: "Created kling-4k-t2v and kling-4k-i2v". \
+   Extract specific names from context data.
+4. Keep bullets concise. One line per deliverable. No implementation details.
+5. Include org/repo when available. No time estimates.
+6. Multiple related fixes to the same component = one bullet summarizing the outcome. \
+   Bad: "Fix A, Fix B, Fix C in module X". Good: "Fixed activity tracking in module X".
+7. Write in {lang}. Use {format} formatting.
+8. Do NOT include "Next steps", "Blockers", or "TODO" sections.
 {context_section}
 Raw activity data:
 {activities}
