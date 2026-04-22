@@ -135,7 +135,7 @@ Below is raw classified activity data from their Claude Code sessions. Your job:
    internal tool output ("List project directory", "Check git status"), JSON artifacts, and \
    anything that looks like Claude Code internal machinery rather than actual developer work
 3. MERGE related activities: multiple entries about the same feature/bug = one bullet
-4. Include org/repo and approximate time when available
+4. Include org/repo when available. Do NOT include time estimates or durations.
 5. Write in {lang}
 6. Use {format} formatting
 7. Do NOT include "Next steps", "Blockers", or "TODO" sections. Only summarize what was done.
@@ -165,8 +165,7 @@ def generate_llm_report(
     lines = []
     for act in activities:
         org_repo = f"({act.git_org}/{act.git_repo})" if act.git_org and act.git_repo else ""
-        time_part = f" ~{act.time_spent_minutes}min" if act.time_spent_minutes else ""
-        lines.append(f"- [{act.day}] [{act.classification}]{org_repo} {act.summary}{time_part}")
+        lines.append(f"- [{act.day}] [{act.classification}]{org_repo} {act.summary}")
         # Include raw prompts (truncated) so LLM can see the full story
         for prompt in act.raw_prompts[:5]:  # max 5 prompts per activity
             truncated = prompt.strip().split("\n")[0][:120]
