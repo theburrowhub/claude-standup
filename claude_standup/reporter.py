@@ -136,11 +136,14 @@ Below is raw classified activity data from their Claude Code sessions. Your job:
    anything that looks like Claude Code internal machinery rather than actual developer work
 3. MERGE related activities: multiple entries about the same feature/bug = one bullet
 4. Include org/repo and approximate time when available
-5. Infer "Next" from incomplete work patterns
+5. For "Next": infer ONLY from work that is clearly incomplete. \
+   If an activity shows signs of completion (PR merged, deployed, approved, committed), \
+   do NOT list it as next. Look for tool actions like "gh pr merge", "deploy", "approve" \
+   as completion signals.
 6. Identify "Blockers" from repeated failures or confusion. If none, say "None"
 7. Write in {lang}
 8. Use {format} formatting
-
+{context_section}
 Raw activity data:
 {activities}
 """
@@ -150,19 +153,41 @@ def generate_llm_report(
     activities: list[Activity],
     output_format: str = "markdown",
     lang: str = "es",
+    context_activities: list[Activity] | None = None,
 ) -> str:
-    """Generate a polished standup report using one claude -p call."""
+    """Generate a polished standup report using one claude -p call.
+
+    *context_activities*: activities from previous days (e.g. yesterday) so the LLM
+    knows what's already done and doesn't suggest completed work as "Next".
+    """
     if not activities:
         if lang == "en":
             return "No activity found for the requested period."
         return "No se encontró actividad para el período solicitado."
 
-    # Build raw data for the LLM
+    # Build raw data for the LLM — include all prompts so it can see completion signals
     lines = []
     for act in activities:
         org_repo = f"({act.git_org}/{act.git_repo})" if act.git_org and act.git_repo else ""
         time_part = f" ~{act.time_spent_minutes}min" if act.time_spent_minutes else ""
         lines.append(f"- [{act.day}] [{act.classification}]{org_repo} {act.summary}{time_part}")
+        # Include raw prompts (truncated) so LLM can see the full story
+        for prompt in act.raw_prompts[:5]:  # max 5 prompts per activity
+            truncated = prompt.strip().split("\n")[0][:120]
+            if len(truncated) > 15:
+                lines.append(f"    > {truncated}")
+
+    # Build context section from previous days
+    context_section = ""
+    if context_activities:
+        ctx_lines = []
+        for act in context_activities:
+            org_repo = f"({act.git_org}/{act.git_repo})" if act.git_org and act.git_repo else ""
+            ctx_lines.append(f"- [{act.day}] [{act.classification}]{org_repo} {act.summary}")
+        context_section = (
+            "\nContext — activities from previous days (already completed, do NOT suggest as Next):\n"
+            + "\n".join(ctx_lines) + "\n\n"
+        )
 
     lang_name = "Spanish" if lang == "es" else "English"
     fmt_name = "Slack (*bold*, • bullets)" if output_format == "slack" else "Markdown (## headers, - bullets)"
@@ -171,6 +196,7 @@ def generate_llm_report(
         lang=lang_name,
         format=fmt_name,
         activities="\n".join(lines),
+        context_section=context_section,
     )
 
     claude_path = shutil.which("claude")
