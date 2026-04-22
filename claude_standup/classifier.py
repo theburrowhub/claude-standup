@@ -89,6 +89,17 @@ def classify_session_local(entries: list[LogEntry]) -> list[Activity]:
         timestamps = sorted(e.timestamp for e in day_entries if e.timestamp)
         time_minutes = _estimate_minutes(timestamps)
 
+        # Collect context for the LLM reporter: user prompts + key assistant/tool signals
+        context_lines = [e.content for e in user_prompts]
+        for e in assistant_texts:
+            first_line = e.content.split("\n")[0].strip()
+            if len(first_line) > 20:
+                context_lines.append(f"[assistant] {first_line}")
+        for e in tool_uses:
+            for desc in (e.content.split("\n") if e.content else []):
+                if len(desc.strip()) > 10:
+                    context_lines.append(f"[tool] {desc.strip()}")
+
         activities.append(Activity(
             session_id=entries[0].session_id,
             day=day,
@@ -100,7 +111,7 @@ def classify_session_local(entries: list[LogEntry]) -> list[Activity]:
             files_mentioned=_extract_files(all_signals),
             technologies=_extract_technologies(all_signals),
             time_spent_minutes=time_minutes,
-            raw_prompts=[e.content for e in user_prompts],
+            raw_prompts=context_lines,
         ))
 
     return activities

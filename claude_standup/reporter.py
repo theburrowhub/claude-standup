@@ -134,7 +134,12 @@ Below is raw classified activity data from their Claude Code sessions. Your job:
 2. IGNORE noise: subagent instructions ("You are implementing...", "You are reviewing..."), \
    internal tool output ("List project directory", "Check git status"), JSON artifacts, and \
    anything that looks like Claude Code internal machinery rather than actual developer work
-3. MERGE related activities: multiple entries about the same feature/bug = one bullet
+3. MERGE only truly redundant entries (exact same task mentioned multiple times). \
+   When there are multiple distinct deliverables (e.g. several PRs, several services, \
+   several bugs fixed), LIST EACH ONE by name. Never collapse distinct items into \
+   a single vague summary. Bad: "Created new inference services". \
+   Good: "Created kling-4k-t2v and kling-4k-i2v inference services". \
+   Extract specific names from the context data (tool descriptions, assistant messages).
 4. Include org/repo when available. Do NOT include time estimates or durations.
 5. Write in {lang}
 6. Use {format} formatting
@@ -167,7 +172,7 @@ def generate_llm_report(
         org_repo = f"({act.git_org}/{act.git_repo})" if act.git_org and act.git_repo else ""
         lines.append(f"- [{act.day}] [{act.classification}]{org_repo} {act.summary}")
         # Include raw prompts (truncated) so LLM can see the full story
-        for prompt in act.raw_prompts[:5]:  # max 5 prompts per activity
+        for prompt in act.raw_prompts[:15]:  # max 15 context lines per activity
             truncated = prompt.strip().split("\n")[0][:120]
             if len(truncated) > 15:
                 lines.append(f"    > {truncated}")
