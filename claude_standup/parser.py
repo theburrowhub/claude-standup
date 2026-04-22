@@ -21,8 +21,6 @@ _NOISE_EXACT = frozenset({
 
 # Prefix patterns that indicate system/hook prompts or subagent instructions, not user intent
 _NOISE_PREFIXES = (
-    "<command-name>",
-    "<command-message>",
     "<local-command-caveat>",
     "You receive a CLI command",
     "You are implementing ",

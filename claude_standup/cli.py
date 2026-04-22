@@ -116,24 +116,14 @@ def _process_and_classify(
     verbose: bool = False,
 ) -> None:
     """Parse new/modified files, classify locally, store results. All local, no LLM."""
-    # Only look at files modified recently (within lookback window)
-    cutoff_date = date_from  # Only process files that could contain data in range
     all_files = discover_jsonl_files(logs_base)
+    # Skip subagent files — they're internal, not user activity
+    all_files = [f for f in all_files if "/subagents/" not in f.path]
 
     if verbose:
-        print(f"Discovered {len(all_files)} JSONL file(s).", file=sys.stderr)
+        print(f"Discovered {len(all_files)} JSONL file(s) (excl. subagents).", file=sys.stderr)
 
-    # Filter by mtime: skip files not modified since before the date range
-    cutoff_ts = datetime.fromisoformat(f"{cutoff_date}T00:00:00+00:00").timestamp()
-    recent_files = [
-        f for f in all_files
-        if f.mtime >= cutoff_ts and "/subagents/" not in f.path
-    ]
-
-    if verbose:
-        print(f"Files modified since {cutoff_date}: {len(recent_files)}", file=sys.stderr)
-
-    to_process = db.get_unprocessed_files(recent_files)
+    to_process = db.get_unprocessed_files(all_files)
 
     if verbose:
         print(f"New/modified to process: {len(to_process)}", file=sys.stderr)

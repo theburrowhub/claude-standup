@@ -55,62 +55,55 @@ def classify_session_local(entries: list[LogEntry]) -> list[Activity]:
     if not entries:
         return []
 
-    user_prompts = [e for e in entries if e.entry_type == "user_prompt"]
-    tool_uses = [e for e in entries if e.entry_type == "tool_use"]
-    assistant_texts = [e for e in entries if e.entry_type == "assistant_text"]
+    # Group entries by day — a session spanning midnight produces multiple activities
+    from itertools import groupby
+    from operator import attrgetter
 
-    if not user_prompts and not tool_uses:
-        return []
+    sorted_entries = sorted(entries, key=lambda e: e.timestamp[:10])
+    activities = []
 
-    # Collect all text signals
-    all_text = " ".join(e.content for e in user_prompts)
-    all_tool_descriptions = " ".join(
-        desc for e in tool_uses for desc in (e.content.split("\n") if e.content else [])
-    )
-    # Tool names as classification signal
-    all_tool_names = [name for e in tool_uses for name in e.tool_names]
-    tool_name_str = " ".join(all_tool_names)
+    for day, day_entries_iter in groupby(sorted_entries, key=lambda e: e.timestamp[:10]):
+        day_entries = list(day_entries_iter)
 
-    # Bash command descriptions are stored in tool_use content field by the parser
-    all_signals = f"{all_text} {all_tool_descriptions} {tool_name_str}"
+        user_prompts = [e for e in day_entries if e.entry_type == "user_prompt"]
+        tool_uses = [e for e in day_entries if e.entry_type == "tool_use"]
+        assistant_texts = [e for e in day_entries if e.entry_type == "assistant_text"]
 
-    # Git branch signal
-    branch = next((e.git_branch for e in entries if e.git_branch), None)
-    branch_class = _classify_from_branch(branch) if branch else None
+        if not user_prompts and not tool_uses:
+            continue
 
-    # Classify
-    classification = _classify_from_signals(all_signals, all_tool_names, branch_class)
+        all_text = " ".join(e.content for e in user_prompts)
+        all_tool_descriptions = " ".join(
+            desc for e in tool_uses for desc in (e.content.split("\n") if e.content else [])
+        )
+        all_tool_names = [name for e in tool_uses for name in e.tool_names]
+        tool_name_str = " ".join(all_tool_names)
+        all_signals = f"{all_text} {all_tool_descriptions} {tool_name_str}"
 
-    # Build summary from the best available sources
-    summary = _build_summary(user_prompts, tool_uses, assistant_texts)
+        branch = next((e.git_branch for e in day_entries if e.git_branch), None)
+        branch_class = _classify_from_branch(branch) if branch else None
 
-    # Estimate time from timestamps
-    timestamps = sorted(e.timestamp for e in entries if e.timestamp)
-    time_minutes = _estimate_minutes(timestamps)
+        classification = _classify_from_signals(all_signals, all_tool_names, branch_class)
+        summary = _build_summary(user_prompts, tool_uses, assistant_texts)
 
-    # Extract files mentioned
-    files_mentioned = _extract_files(all_signals)
+        timestamps = sorted(e.timestamp for e in day_entries if e.timestamp)
+        time_minutes = _estimate_minutes(timestamps)
 
-    # Extract technologies
-    technologies = _extract_technologies(all_signals)
+        activities.append(Activity(
+            session_id=entries[0].session_id,
+            day=day,
+            project=entries[0].project,
+            git_org=None,
+            git_repo=None,
+            classification=classification,
+            summary=summary,
+            files_mentioned=_extract_files(all_signals),
+            technologies=_extract_technologies(all_signals),
+            time_spent_minutes=time_minutes,
+            raw_prompts=[e.content for e in user_prompts],
+        ))
 
-    session_id = entries[0].session_id
-    day = entries[0].timestamp[:10]
-    project = entries[0].project
-
-    return [Activity(
-        session_id=session_id,
-        day=day,
-        project=project,
-        git_org=None,  # filled in by caller
-        git_repo=None,
-        classification=classification,
-        summary=summary,
-        files_mentioned=files_mentioned,
-        technologies=technologies,
-        time_spent_minutes=time_minutes,
-        raw_prompts=[e.content for e in user_prompts],
-    )]
+    return activities
 
 
 def _classify_from_branch(branch: str) -> str | None:
