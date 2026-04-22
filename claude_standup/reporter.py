@@ -130,19 +130,15 @@ You are generating a daily standup report for a software developer.
 
 Below is raw classified activity data from their Claude Code sessions. Your job:
 
-1. Write a clean, concise standup report with sections: Done, Next, Blockers
+1. Write a clean, concise activity summary. One section: what was done, grouped by project.
 2. IGNORE noise: subagent instructions ("You are implementing...", "You are reviewing..."), \
    internal tool output ("List project directory", "Check git status"), JSON artifacts, and \
    anything that looks like Claude Code internal machinery rather than actual developer work
 3. MERGE related activities: multiple entries about the same feature/bug = one bullet
 4. Include org/repo and approximate time when available
-5. For "Next": infer ONLY from work that is clearly incomplete. \
-   If an activity shows signs of completion (PR merged, deployed, approved, committed), \
-   do NOT list it as next. Look for tool actions like "gh pr merge", "deploy", "approve" \
-   as completion signals.
-6. Identify "Blockers" from repeated failures or confusion. If none, say "None"
-7. Write in {lang}
-8. Use {format} formatting
+5. Write in {lang}
+6. Use {format} formatting
+7. Do NOT include "Next steps", "Blockers", or "TODO" sections. Only summarize what was done.
 {context_section}
 Raw activity data:
 {activities}
