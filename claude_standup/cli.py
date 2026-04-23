@@ -11,12 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from claude_standup.cache import CacheDB
-from claude_standup.classifier import classify_session_local
-from claude_standup.models import GitInfo, LogEntry
+from claude_standup.models import Activity, GitInfo
 from claude_standup.parser import (
     derive_project_name,
     discover_jsonl_files,
-    parse_jsonl_file,
+    parse_session_summaries,
     resolve_git_remote,
 )
 from claude_standup.reporter import generate_template_report, generate_llm_report
@@ -108,25 +107,26 @@ def _looks_like_subagent_dir(name: str) -> bool:
     return bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", name))
 
 
-def _process_and_classify(
+def _process_files(
     db: CacheDB,
     logs_base: str,
-    date_from: str,
-    date_to: str,
     verbose: bool = False,
 ) -> None:
-    """Parse new/modified files, classify locally, store results. All local, no LLM."""
+    """Parse new/modified files, extract away_summaries, store as activities.
+
+    Uses away_summary entries as the primary data source — these are
+    high-quality session recaps written by Claude Code itself.
+    """
     all_files = discover_jsonl_files(logs_base)
-    # Skip subagent files — they're internal, not user activity
     all_files = [f for f in all_files if "/subagents/" not in f.path]
 
     if verbose:
-        print(f"Discovered {len(all_files)} JSONL file(s) (excl. subagents).", file=sys.stderr)
+        print(f"Discovered {len(all_files)} JSONL file(s).", file=sys.stderr)
 
     to_process = db.get_unprocessed_files(all_files)
 
     if verbose:
-        print(f"New/modified to process: {len(to_process)}", file=sys.stderr)
+        print(f"New/modified: {len(to_process)}", file=sys.stderr)
 
     git_cache: dict[str, GitInfo] = {}
 
@@ -137,35 +137,24 @@ def _process_and_classify(
         project = derive_project_name(dir_name)
 
         if verbose:
-            print(f"  [{idx}/{len(to_process)}] {project or '(subagent)'}: {Path(fi.path).name}", file=sys.stderr)
+            print(f"  [{idx}/{len(to_process)}] {project or '?'}", file=sys.stderr)
 
-        entries = parse_jsonl_file(fi.path, project)
-        if not entries:
-            db.mark_file_processed(fi.path, fi.mtime)
-            continue
+        summaries = parse_session_summaries(fi.path, project)
 
-        first_cwd = entries[0].cwd
-        git_info = resolve_git_remote(first_cwd, git_cache) if first_cwd else GitInfo()
+        for s in summaries:
+            cwd = s["cwd"]
+            git_info = resolve_git_remote(cwd, git_cache) if cwd else GitInfo()
+            day = s["timestamp"][:10]
 
-        # Group by session
-        sessions: dict[str, list[LogEntry]] = {}
-        for entry in entries:
-            sessions.setdefault(entry.session_id, []).append(entry)
-
-        for session_id, session_entries in sessions.items():
-            timestamps = [e.timestamp for e in session_entries if e.timestamp]
-            first_ts = min(timestamps) if timestamps else ""
-            last_ts = max(timestamps) if timestamps else ""
-
-            db.store_session(session_id, project, git_info.org, git_info.repo, first_ts, last_ts)
-
-            # Classify locally — instant, no LLM
-            activities = classify_session_local(session_entries)
-            for act in activities:
-                act.git_org = git_info.org
-                act.git_repo = git_info.repo
-            if activities:
-                db.store_activities(activities)
+            db.store_activities([Activity(
+                session_id=s["session_id"],
+                day=day,
+                project=project,
+                git_org=git_info.org,
+                git_repo=git_info.repo,
+                classification="",  # not needed — summary speaks for itself
+                summary=s["content"],
+            )])
 
         db.mark_file_processed(fi.path, fi.mtime)
 
@@ -178,7 +167,7 @@ def _run_report(db: CacheDB, logs_base: str, args: argparse.Namespace) -> str:
     if verbose:
         print(f"Date range: {date_from} .. {date_to}", file=sys.stderr)
 
-    _process_and_classify(db, logs_base, date_from, date_to, verbose=verbose)
+    _process_files(db, logs_base, verbose=verbose)
 
     orgs = [o.strip() for o in args.org.split(",")] if args.org else None
     repos = [r.strip() for r in args.repo.split(",")] if args.repo else None
