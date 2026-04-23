@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: claude-standup
-Version: 0.1.0
-Summary: Generate daily standup reports from Claude Code activity logs
-Requires-Python: >=3.11
-Requires-Dist: anthropic>=0.40.0
-Provides-Extra: dev
-Requires-Dist: pytest>=8.0; extra == "dev"
-Requires-Dist: pytest-cov>=5.0; extra == "dev"
