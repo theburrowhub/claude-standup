@@ -1,5 +1,0 @@
-{"type":"user","message":{"role":"user","content":"Fix the bug"},"timestamp":"2026-04-21T10:00:00.000Z","sessionId":"sess-002","cwd":"/Users/dev/projects/api","gitBranch":"fix/bug"}
-this is not valid json at all
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I found the bug."}]},"timestamp":"2026-04-21T10:00:05.000Z","sessionId":"sess-002","cwd":"/Users/dev/projects/api","gitBranch":"fix/bug"}
-{"broken json": true, missing closing
-{"type":"user","message":{"role":"user","content":"Great, commit it"},"timestamp":"2026-04-21T10:05:00.000Z","sessionId":"sess-002","cwd":"/Users/dev/projects/api","gitBranch":"fix/bug"}

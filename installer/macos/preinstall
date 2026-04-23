@@ -1,2 +1,0 @@
-#!/bin/bash
-launchctl unload ~/Library/LaunchAgents/com.claude-standup.daemon.plist 2>/dev/null || true

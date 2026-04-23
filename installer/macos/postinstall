@@ -1,2 +1,0 @@
-#!/bin/bash
-/usr/local/bin/claude-standup daemon start 2>/dev/null || true
