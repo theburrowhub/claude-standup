@@ -59,6 +59,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("yesterday", parents=[common], help="Report for yesterday.")
     subparsers.add_parser("last-7-days", parents=[common], help="Report for the last 7 days.")
     subparsers.add_parser("status", parents=[common], help="Show processing status.")
+    subparsers.add_parser("check", parents=[common], help="Check data source health.")
 
     log_parser = subparsers.add_parser("log", parents=[common], help="Add a manual activity entry.")
     log_parser.add_argument("message", help="Activity description.")
@@ -159,6 +160,94 @@ def _process_files(
         db.mark_file_processed(fi.path, fi.mtime)
 
 
+def _handle_check(logs_base: str, args: argparse.Namespace) -> None:
+    """Check data source health: scan JSONL files for away_summary coverage."""
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    date_from, date_to = resolve_date_range(args.command, args.date_from, args.date_to)
+    # Use the report date range, default to last 7 days for check
+    if args.command == "check" and not args.date_from:
+        date_from = (date.today() - timedelta(days=6)).isoformat()
+        date_to = date.today().isoformat()
+
+    all_files = discover_jsonl_files(logs_base)
+    all_files = [f for f in all_files if "/subagents/" not in f.path]
+
+    total_sessions = 0
+    with_summary = 0
+    without_summary = 0
+    summaries_by_day: dict[str, int] = {}
+    sessions_by_day: dict[str, int] = {}
+    versions: set[str] = set()
+
+    for fi in all_files:
+        with open(fi.path, "r") as fh:
+            file_has_summary = False
+            file_has_activity_in_range = False
+            ver = None
+
+            for line in fh:
+                try:
+                    obj = _json.loads(line.strip())
+                except (ValueError, _json.JSONDecodeError):
+                    continue
+
+                ts = obj.get("timestamp", "")
+                day = ts[:10]
+
+                if not ver and obj.get("version"):
+                    ver = obj["version"]
+
+                if day < date_from or day > date_to:
+                    continue
+
+                if obj.get("type") == "user" and isinstance(obj.get("message", {}).get("content"), str):
+                    file_has_activity_in_range = True
+                    sessions_by_day[day] = sessions_by_day.get(day, 0) + 1
+
+                if obj.get("type") == "system" and obj.get("subtype") == "away_summary":
+                    file_has_summary = True
+                    summaries_by_day[day] = summaries_by_day.get(day, 0) + 1
+
+            if file_has_activity_in_range:
+                total_sessions += 1
+                if file_has_summary:
+                    with_summary += 1
+                else:
+                    without_summary += 1
+            if ver:
+                versions.add(ver)
+
+    # Deduplicate session counts per day (we counted user prompts, not unique sessions)
+    # The raw counts are fine for the check — they show volume
+
+    pct = int(with_summary / total_sessions * 100) if total_sessions else 0
+
+    print(f"Data source check ({date_from} to {date_to})")
+    print(f"")
+    print(f"  Sessions with activity:  {total_sessions}")
+    print(f"  With away_summary:       {with_summary} ({pct}%)")
+    print(f"  Without away_summary:    {without_summary}")
+    print(f"  Claude Code versions:    {', '.join(sorted(versions)) or '?'}")
+    print(f"")
+    print(f"  Per day:")
+    all_days = sorted(set(list(summaries_by_day.keys()) + list(sessions_by_day.keys())))
+    for day in all_days:
+        s = summaries_by_day.get(day, 0)
+        t = sessions_by_day.get(day, 0)
+        bar = "█" * s + "░" * max(0, t - s) if t > 0 else ""
+        print(f"    {day}  {s}/{t} summaries  {bar}")
+
+    print(f"")
+    if pct < 50:
+        print(f"  ⚠  Low coverage. away_summary is a recent Claude Code feature.")
+        print(f"     Sessions without it will have limited detail in reports.")
+        print(f"     Update Claude Code to the latest version for best results.")
+    else:
+        print(f"  ✓  Good coverage. Reports should be accurate.")
+
+
 def _run_report(db: CacheDB, logs_base: str, args: argparse.Namespace) -> str:
     """Full pipeline: process files → query → generate report. All local."""
     verbose = getattr(args, "verbose", False)
@@ -206,6 +295,11 @@ def main(argv: list[str] | None = None, logs_base: str | None = None, db_path: s
         )
         db.close()
         print(f"Logged: [{args.type}] {args.message}", file=sys.stderr)
+        return
+
+    # Check command
+    if args.command == "check":
+        _handle_check(effective_logs_base, args)
         return
 
     # Status command
