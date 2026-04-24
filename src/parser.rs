@@ -40,8 +40,9 @@ pub fn discover_jsonl_files(base_path: &str) -> Vec<FileInfo> {
 
 /// Extract `away_summary` entries from a JSONL file.
 ///
-/// Returns a list of `SessionSummary` structs extracted from lines where
-/// `type == "system"` and `subtype == "away_summary"`.
+/// Each summary gets the timestamp of the **preceding user prompt** (not the
+/// summary itself), so the `day` reflects when the work actually happened
+/// rather than when Claude Code regenerated the recap.
 pub fn parse_session_summaries(file_path: &str, project_name: &str) -> Vec<SessionSummary> {
     let mut summaries = Vec::new();
 
@@ -51,6 +52,16 @@ pub fn parse_session_summaries(file_path: &str, project_name: &str) -> Vec<Sessi
     };
 
     let reader = BufReader::new(file);
+
+    // We collect ALL away_summaries but only keep the LAST one per session,
+    // which is the most complete recap. We use the session's first user
+    // prompt timestamp as the activity date (not the summary's timestamp,
+    // which gets regenerated each time the session is resumed).
+    let mut first_user_ts = String::new();
+    let mut session_cwd = String::new();
+    let mut session_id = String::new();
+    let mut session_git_branch: Option<String> = None;
+    let mut last_summary_content = String::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -68,6 +79,29 @@ pub fn parse_session_summaries(file_path: &str, project_name: &str) -> Vec<Sessi
         };
 
         let entry_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Track the first user prompt for the real activity date
+        if entry_type == "user" {
+            if let Some(ts) = obj.get("timestamp").and_then(|v| v.as_str()) {
+                if first_user_ts.is_empty() {
+                    first_user_ts = ts.to_string();
+                }
+            }
+            if session_cwd.is_empty() {
+                if let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str()) {
+                    session_cwd = cwd.to_string();
+                }
+            }
+            if session_id.is_empty() {
+                if let Some(sid) = obj.get("sessionId").and_then(|v| v.as_str()) {
+                    session_id = sid.to_string();
+                }
+            }
+            if session_git_branch.is_none() {
+                session_git_branch = obj.get("gitBranch").and_then(|v| v.as_str()).map(|s| s.to_string());
+            }
+        }
+
         let subtype = obj.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
 
         if entry_type == "system" && subtype == "away_summary" {
@@ -79,30 +113,30 @@ pub fn parse_session_summaries(file_path: &str, project_name: &str) -> Vec<Sessi
                 .to_string();
 
             if !content.is_empty() {
-                summaries.push(SessionSummary {
-                    timestamp: obj
-                        .get("timestamp")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    session_id: obj
-                        .get("sessionId")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    project: project_name.to_string(),
-                    content,
-                    cwd: obj
-                        .get("cwd")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    git_branch: obj
-                        .get("gitBranch")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                });
+                // Overwrite — we only want the last (most complete) summary
+                last_summary_content = content;
             }
+        }
+    }
+
+    // Emit a single summary for the session (the last away_summary)
+    if !last_summary_content.is_empty() {
+        let ts = if !first_user_ts.is_empty() {
+            first_user_ts
+        } else {
+            // No user prompts at all — shouldn't happen, but fallback
+            String::new()
+        };
+
+        if !ts.is_empty() {
+            summaries.push(SessionSummary {
+                timestamp: ts,
+                session_id,
+                project: project_name.to_string(),
+                content: last_summary_content,
+                cwd: session_cwd,
+                git_branch: session_git_branch,
+            });
         }
     }
 
