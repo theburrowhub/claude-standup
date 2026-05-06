@@ -46,29 +46,32 @@ pub fn generate_template_report(activities: &[Activity], format: &str, lang: &st
         by_day.entry(activity.day.as_str()).or_default().push(activity);
     }
 
-    let is_slack = format == "slack";
     let mut output = String::new();
 
     for (day, day_activities) in &by_day {
-        // Day header
-        if is_slack {
-            output.push_str(&format!("*{}*\n\n", day));
-        } else {
-            output.push_str(&format!("## {}\n\n", day));
-        }
-
-        // "Done" section header
-        if is_slack {
-            output.push_str("*Done*\n");
-        } else {
-            output.push_str("### Done\n");
-        }
-
-        // Activity lines
-        let bullet = if is_slack { "•" } else { "-" };
-        for activity in day_activities {
-            output.push_str(&format_activity_line(activity, bullet));
-            output.push('\n');
+        match format {
+            "slack" => {
+                output.push_str(&format!("*{}*\n\n*Done*\n", day));
+                for activity in day_activities {
+                    output.push_str(&format_activity_line(activity, "•"));
+                    output.push('\n');
+                }
+            }
+            "plain" => {
+                output.push_str(&format!("{}\n\n", day));
+                for activity in day_activities {
+                    output.push_str(&format_activity_line(activity, "-"));
+                    output.push('\n');
+                }
+            }
+            _ => {
+                // markdown
+                output.push_str(&format!("## {}\n\n### Done\n", day));
+                for activity in day_activities {
+                    output.push_str(&format_activity_line(activity, "-"));
+                    output.push('\n');
+                }
+            }
         }
 
         output.push('\n');
@@ -122,10 +125,10 @@ pub fn generate_llm_report(activities: &[Activity], format: &str, lang: &str) ->
         _ => "English",
     };
 
-    let format_desc = if format == "slack" {
-        "Slack (*bold*, • bullets)"
-    } else {
-        "Markdown (## headers, - bullets)"
+    let format_desc = match format {
+        "slack" => "Slack (*bold*, • bullets)",
+        "plain" => "Plain text (no formatting, just date headers and - bullets)",
+        _ => "Markdown (## headers, - bullets)",
     };
 
     let prompt = format!(
@@ -241,6 +244,20 @@ mod tests {
         assert!(result.contains("*Done*"));
         assert!(result.contains("• [feature] (acme/api) Add user endpoint"));
         assert!(result.contains("• Update landing page"));
+    }
+
+    #[test]
+    fn test_plain_format() {
+        let activities = sample_activities();
+        let result = generate_template_report(&activities, "plain", "en");
+
+        assert!(result.contains("2026-04-20"));
+        assert!(result.contains("2026-04-21"));
+        assert!(!result.contains("##"));
+        assert!(!result.contains("###"));
+        assert!(!result.contains("*"));
+        assert!(result.contains("- [feature] (acme/api) Add user endpoint"));
+        assert!(result.contains("- Update landing page"));
     }
 
     #[test]
